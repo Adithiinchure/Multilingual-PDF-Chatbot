@@ -6,13 +6,17 @@ from deep_translator import GoogleTranslator
 import logging
 import requests
 import tempfile
-import shutil
-
+import pytesseract
+from PIL import Image
+import fitz
 from langchain.vectorstores import Chroma
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.document_loaders import PyMuPDFLoader   # ✅ NEW
+
+# 🔥 OCR setup
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
 
 load_dotenv()
 
@@ -34,6 +38,9 @@ for k,v in [("chat_history",[]),("pdf_name",""),("result",None)]:
 if "translated_text" not in st.session_state:
     st.session_state.translated_text = ""
 
+if "history" not in st.session_state:
+    st.session_state.history = []
+
 st.set_page_config(page_title="Multilingual PDF Chatbot", layout="wide")
 
 # ✅ EMBEDDINGS
@@ -48,11 +55,10 @@ def translate_to_english(text):
     except:
         return text
 
-# ✅ NEW PDF LOADER (FIXED)
-def extract_pdf_pages(file_path):
+# ✅ PDF FUNCTION (FIXED)
+def extract_pdf_pages(file_path, mode="Normal (text pdf)"):
 
-    loader = PyMuPDFLoader(file_path)
-    documents = loader.load()
+    doc = fitz.open(file_path)
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
@@ -61,20 +67,40 @@ def extract_pdf_pages(file_path):
 
     docs = []
 
-    for doc in documents:
-        chunks = splitter.split_text(doc.page_content)
+    for page_num in range(len(doc)):
+
+        page = doc[page_num]
+
+        if mode == "Normal (Fast)":
+            text = page.get_text("text")
+            print(f"⚡ Page {page_num+1}: Normal extraction")
+
+        else:
+            print(f"🌍 Page {page_num+1}: OCR extraction")
+
+            pix = page.get_pixmap()
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+            text = pytesseract.image_to_string(
+                img,
+                lang='eng+tel+hin'
+            )
+
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        chunks = splitter.split_text(text)
 
         for chunk in chunks:
             docs.append(
                 Document(
                     page_content=chunk,
-                    metadata={"page": doc.metadata.get("page", 0) + 1}
+                    metadata={"page": page_num + 1}
                 )
             )
 
     return docs
 
-# ✅ GROQ
+# ✅ GROQ + OPENROUTER
 def groq_call(messages):
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -83,14 +109,40 @@ def groq_call(messages):
             model=GROQ_MODEL,
             messages=messages,
             max_tokens=500,
-            temperature=0
+            temperature=0.2
         )
         return r.choices[0].message.content.strip()
 
-    except Exception as e:
-        return f"⚠️ ERROR: {e}"
+    except:
+        openrouter_response = openrouter_call(messages)
+        if "⚠️" not in openrouter_response:
+            return openrouter_response
+        return "⚠️ All AI services failed."
 
-# ✅ FIXED RETRIEVE
+def openrouter_call(messages):
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": "mistralai/mistral-7b-instruct",
+        "messages": messages
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        else:
+            return "⚠️ OpenRouter failed"
+    except:
+        return "⚠️ OpenRouter error"
+
+# ✅ RETRIEVE
 def retrieve(query, vectorstore, k=5):
 
     results = vectorstore.similarity_search(query, k=k*2)
@@ -110,80 +162,67 @@ def retrieve(query, vectorstore, k=5):
 
     return pages
 
-# ✅ LLM
+# ✅ ASK
 def ask_groq(query, pages):
 
     if not pages:
-        return {"answer": "Answer not found in document", "sources": []}
+        return {"answer": "Answer not found", "sources": []}
 
     context = ""
-    page_numbers = []
-
     for p in pages:
         context += f"\n\n[PAGE {p['page']}]\n{p['text']}"
-        page_numbers.append(str(p["page"]))
-
-    system = f"""
-You are a document QA assistant.
-
-RULES:
-- Answer ONLY from the provided context
-- ALWAYS answer in ENGLISH
-- If answer is present → give exact answer
-- If not → say "Answer not found in document"
-"""
-
-    user_prompt = f"""
-Question: {query}
-
-Context:
-{context}
-
-Answer:
-"""
 
     raw = groq_call([
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_prompt}
+        {"role": "system", "content": "Answer from context only"},
+        {"role": "user", "content": f"{query}\n\n{context}"}
     ])
 
     return {"answer": raw, "sources": pages}
 
 # ───────── SIDEBAR ─────────
+# ───────── SIDEBAR ─────────
 with st.sidebar:
+
+    mode = st.radio("Mode", ["Normal (text pdf english)", "OCR (Multilingual)"])
 
     uploaded = st.file_uploader("Upload PDF", type=["pdf"])
 
     if uploaded:
         if uploaded.name != st.session_state.pdf_name:
 
-            # ✅ SAVE TEMP FILE
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 tmp.write(uploaded.read())
                 tmp_path = tmp.name
 
-            docs = extract_pdf_pages(tmp_path)
+            docs = extract_pdf_pages(tmp_path, mode)
 
             vectorstore = Chroma.from_documents(
                 documents=docs,
                 embedding=embedding_model,
-                persist_directory=f"chroma_db_{uploaded.name}"   # ✅ FIX
+                persist_directory=f"chroma_db_{uploaded.name}"
             )
-
-            vectorstore.persist()
 
             st.session_state.vectorstore = vectorstore
             st.session_state.pdf_name = uploaded.name
-            st.session_state.chat_history = []
 
             st.success("✅ PDF processed!")
+
+    # 🔥 HISTORY BELOW PDF (THIS IS YOUR REQUIRED PART)
+    st.markdown("---")
+    st.markdown("### 📜 History")
+
+    for i, item in enumerate(st.session_state.history):
+        if st.button(item["q"], key=f"side{i}"):
+            st.session_state.selected_q = item["q"]
+            st.session_state.selected_a = item["a"]
+
 
 # ───────── MAIN ─────────
 st.title("💬 Multilingual PDF Chatbot")
 
 user_input = st.text_input("Ask something")
 
-if  st.button("Ask") and user_input:
+if st.button("Ask") and user_input:
 
     if "vectorstore" not in st.session_state:
         st.warning("Upload PDF first")
@@ -191,68 +230,59 @@ if  st.button("Ask") and user_input:
 
     english_query = translate_to_english(user_input)
 
-    top_pages = retrieve(english_query, st.session_state.vectorstore, k=5)
+    top_pages = retrieve(english_query, st.session_state.vectorstore)
 
     result = ask_groq(english_query, top_pages)
 
     if isinstance(result, dict):
-        st.session_state.result = result
-    else:
-        st.session_state.result = {"answer": "Error occurred", "sources": []}
 
-# ───────── OUTPUT ─────────
+        st.session_state.result = result
+
+        # 🔥 Save history
+        st.session_state.history.insert(0, {
+            "q": user_input,
+            "a": result["answer"]
+        })
+
+        st.session_state.history = st.session_state.history[:10]
+
+
+
 # ───────── OUTPUT ─────────
 result = st.session_state.get("result")
 
-if result and isinstance(result, dict):
+if result:
 
     st.markdown("### 💬 Answer")
-
-    answer_text = result.get("answer", "")
-    answer_text = re.sub(r'\[SOURCE:.*?\]', '', answer_text).strip()
-
-    st.write(answer_text)
+    st.write(result["answer"])
 
     st.markdown("### 📚 Sources")
 
-    sources = result.get("sources", [])
+    for s in result["sources"]:
+        with st.expander(f"📄 Page {s['page']}"):
+            st.write(s["text"])
+if "selected_q" in st.session_state:
 
-    shown_pages = set()
+    st.markdown("### 📌 Selected Question")
+    st.write(st.session_state.selected_q)
 
-    for s in sources:
-        if not isinstance(s, dict):
-            continue
+    st.markdown("### 💡 Answer")
+    st.write(st.session_state.selected_a)
 
-        page = s.get("page")
+# ───────── HISTORY ─────────
 
-        if page and page not in shown_pages:
-            shown_pages.add(page)
+# ───────── TRANSLATE ─────────
+st.markdown("### 🌐 Translate")
 
-            with st.expander(f"📄 Page {page}", expanded=False):
-                st.markdown(f"**Content from Page {page}:**")
-                st.write(s.get("text", ""))
+lang = st.selectbox("Language", ["English", "Telugu", "Hindi"])
 
-else:
-    st.info("👉 Ask a question to see results")
+if st.button("Translate") and result:
 
-# ───────── TRANSLATE OUTPUT ─────────
-st.markdown("### 🌐 Translate Answer")
+    text = result["answer"]
 
-lang_choice = st.selectbox("Select Language", ["English", "Telugu", "Hindi"])
+    if lang == "Telugu":
+        text = GoogleTranslator(source='auto', target='te').translate(text)
+    elif lang == "Hindi":
+        text = GoogleTranslator(source='auto', target='hi').translate(text)
 
-if st.button("Translate") and st.session_state.result:
-
-    clean = re.sub(r'\[SOURCE:.*?\]', '', st.session_state.result["answer"]).strip()
-
-    try:
-        if lang_choice == "English":
-            st.session_state.translated_text = clean
-        elif lang_choice == "Telugu":
-            st.session_state.translated_text = GoogleTranslator(source='auto', target='te').translate(clean)
-        elif lang_choice == "Hindi":
-            st.session_state.translated_text = GoogleTranslator(source='auto', target='hi').translate(clean)
-    except:
-        st.session_state.translated_text = "⚠️ Translation failed"
-
-if st.session_state.translated_text:
-    st.success(st.session_state.translated_text)
+    st.success(text)
