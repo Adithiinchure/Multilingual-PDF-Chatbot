@@ -2,157 +2,149 @@ import streamlit as st
 from groq import Groq
 import re, os
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
-import numpy as np
 from deep_translator import GoogleTranslator
 import logging
 import requests
+import tempfile
+import shutil
+
+from langchain.vectorstores import Chroma
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.schema import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.document_loaders import PyMuPDFLoader   # ✅ NEW
+
 load_dotenv()
+
 HF_API_KEY = os.getenv("HF_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
 logging.basicConfig(
     filename="chatbot.log",
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# Monitoring
-if "fallback_count" not in st.session_state:
-    st.session_state.fallback_count = 0
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-
-import fitz
-
-st.set_page_config(page_title="Multilingual RAG Chatbot", page_icon="💬", layout="wide")
-
-# Session state
-for k,v in [("pdf_pages",[]),("chat_history",[]),("pdf_name","")]:
+# ✅ SESSION
+for k,v in [("chat_history",[]),("pdf_name",""),("result",None)]:
     if k not in st.session_state:
         st.session_state[k]=v
 
-embedding_model = SentenceTransformer("intfloat/multilingual-e5-base")
+if "translated_text" not in st.session_state:
+    st.session_state.translated_text = ""
 
-# ───────── GROQ ─────────
+st.set_page_config(page_title="Multilingual PDF Chatbot", layout="wide")
+
+# ✅ EMBEDDINGS
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
+
+# 🔥 TRANSLATE
+def translate_to_english(text):
+    try:
+        return GoogleTranslator(source='auto', target='en').translate(text)
+    except:
+        return text
+
+# ✅ NEW PDF LOADER (FIXED)
+def extract_pdf_pages(file_path):
+
+    loader = PyMuPDFLoader(file_path)
+    documents = loader.load()
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=100
+    )
+
+    docs = []
+
+    for doc in documents:
+        chunks = splitter.split_text(doc.page_content)
+
+        for chunk in chunks:
+            docs.append(
+                Document(
+                    page_content=chunk,
+                    metadata={"page": doc.metadata.get("page", 0) + 1}
+                )
+            )
+
+    return docs
+
+# ✅ GROQ
 def groq_call(messages):
     client = Groq(api_key=GROQ_API_KEY)
 
     try:
-        logging.info("Calling Groq API")
-
         r = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            max_tokens=800,
+            max_tokens=500,
             temperature=0
         )
-
         return r.choices[0].message.content.strip()
 
     except Exception as e:
-        error_msg = str(e)
-        logging.error(f"Groq failed: {error_msg}")
-
-        # 🔥 Fallback only on limit
-        if "429" in error_msg or "rate limit" in error_msg.lower():
-            logging.info("Switching to Hugging Face fallback")
-
-            st.session_state.fallback_count += 1
-
-            # Convert messages → single prompt
-            prompt = " ".join([m["content"] for m in messages])
-
-            return huggingface_api(prompt)
-
         return f"⚠️ ERROR: {e}"
 
+# ✅ FIXED RETRIEVE
+def retrieve(query, vectorstore, k=5):
 
+    results = vectorstore.similarity_search(query, k=k*2)
 
-def huggingface_api(prompt):
-    API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct"
-
-    headers = {
-        "Authorization": f"Bearer {HF_API_KEY}"
-    }
-
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": 300,
-            "temperature": 0.7
-        }
-    }
-
-    try:
-        response = requests.post(API_URL, headers=headers, json=payload)
-
-        if response.status_code == 200:
-            return response.json()[0]["generated_text"]
-
-        elif response.status_code == 429:
-            logging.error("Hugging Face rate limit reached")
-            return "⚠️ Both APIs are busy. Please try again later."
-
-        else:
-            logging.error(f"HF Error: {response.text}")
-            return "⚠️ Fallback model failed."
-
-    except Exception as e:
-        logging.error(f"HF Exception: {e}")
-        return "⚠️ Hugging Face error."
-# ───────── LANGUAGE ─────────
-def detect_language(text):
-    if re.search(r'[\u0C00-\u0C7F]', text):
-        return "Telugu"
-    if re.search(r'[\u0900-\u097F]', text):
-        return "Hindi"
-    return "English"
-
-# ───────── PDF ─────────
-def extract_pdf_pages(f):
     pages = []
-    doc = fitz.open(stream=f.read(), filetype="pdf")
+    seen = set()
 
-    for i,page in enumerate(doc, start=1):
-        text = re.sub(r'\s+', ' ', page.get_text())
-        pages.append({"page": i, "text": text})
+    for doc in results:
+        page = doc.metadata["page"]
+
+        if page not in seen:
+            seen.add(page)
+            pages.append({
+                "page": page,
+                "text": doc.page_content
+            })
 
     return pages
 
-# ───────── RETRIEVE ─────────
-def retrieve(query, pages, top_k=3):
+# ✅ LLM
+def ask_groq(query, pages):
 
-    query_vec = embedding_model.encode(query)
-
-    scored = []
-
-    for p in pages:
-        chunk = p["text"][:800]
-        vec = embedding_model.encode(chunk)
-
-        sim = np.dot(query_vec, vec) / (
-            np.linalg.norm(query_vec) * np.linalg.norm(vec)
-        )
-
-        scored.append({**p, "score": float(sim)})
-
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:top_k]
-
-# ───────── LLM ─────────
-def ask_groq(query, pages, lang):
+    if not pages:
+        return {"answer": "Answer not found in document", "sources": []}
 
     context = ""
-    for p in pages:
-        context += f"\n\n[PAGE {p['page']}]\n{p['text'][:800]}"
+    page_numbers = []
 
-    system = """
-You are a helpful and friendly assistant. Rules: - Answer in simple, natural English (like talking to a person) - Understand Telugu/Hindi but reply clearly in English - If exact answer is not found, still explain helpfully - Do NOT say NOT_FOUND directly - Keep answer short and clear - Use ONLY the provided pages - End with [SOURCE: Page X] If the question is broad (like summary): - Cover ALL topics from the document - Do NOT focus on only one topic - Give balanced summary of all sections
+    for p in pages:
+        context += f"\n\n[PAGE {p['page']}]\n{p['text']}"
+        page_numbers.append(str(p["page"]))
+
+    system = f"""
+You are a document QA assistant.
+
+RULES:
+- Answer ONLY from the provided context
+- ALWAYS answer in ENGLISH
+- If answer is present → give exact answer
+- If not → say "Answer not found in document"
+"""
+
+    user_prompt = f"""
+Question: {query}
+
+Context:
+{context}
+
+Answer:
 """
 
     raw = groq_call([
-        {"role":"system","content":system},
-        {"role":"user","content":f"{query}\n\n{context}"}
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_prompt}
     ])
 
     return {"answer": raw, "sources": pages}
@@ -164,94 +156,103 @@ with st.sidebar:
 
     if uploaded:
         if uploaded.name != st.session_state.pdf_name:
-            pages = extract_pdf_pages(uploaded)
-            st.session_state.pdf_pages = pages
+
+            # ✅ SAVE TEMP FILE
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded.read())
+                tmp_path = tmp.name
+
+            docs = extract_pdf_pages(tmp_path)
+
+            vectorstore = Chroma.from_documents(
+                documents=docs,
+                embedding=embedding_model,
+                persist_directory=f"chroma_db_{uploaded.name}"   # ✅ FIX
+            )
+
+            vectorstore.persist()
+
+            st.session_state.vectorstore = vectorstore
             st.session_state.pdf_name = uploaded.name
             st.session_state.chat_history = []
-            st.success(f"{len(pages)} pages loaded")
 
-    st.markdown("### 🕑 Chat History")
-
-    for chat in st.session_state.chat_history:
-        st.markdown(f"**Q:** {chat['question']}")
-        st.markdown(f"**A:** {chat['answer'][:100]}...")
-
-        for s in chat["source"]:
-            st.caption(f"📄 Page {s['page']} - {s['text']}")
-
-        st.markdown("---")
+            st.success("✅ PDF processed!")
 
 # ───────── MAIN ─────────
 st.title("💬 Multilingual PDF Chatbot")
 
 user_input = st.text_input("Ask something")
-ask_button = st.button("Ask")
 
-if ask_button and user_input:
+if  st.button("Ask") and user_input:
 
-    if not st.session_state.pdf_pages:
+    if "vectorstore" not in st.session_state:
         st.warning("Upload PDF first")
         st.stop()
 
-    lang = detect_language(user_input)
-    query_len = len(user_input.split())
+    english_query = translate_to_english(user_input)
 
-    # ✅ SUMMARY FIX
-    if query_len > 8:
-        top_pages = st.session_state.pdf_pages
+    top_pages = retrieve(english_query, st.session_state.vectorstore, k=5)
+
+    result = ask_groq(english_query, top_pages)
+
+    if isinstance(result, dict):
+        st.session_state.result = result
     else:
-        top_pages = retrieve(user_input, st.session_state.pdf_pages)
+        st.session_state.result = {"answer": "Error occurred", "sources": []}
 
-    result = ask_groq(user_input, top_pages, lang)
-    st.session_state.result = result
+# ───────── OUTPUT ─────────
+# ───────── OUTPUT ─────────
+result = st.session_state.get("result")
 
-    # ✅ SHOW ANSWER
-    st.write(result["answer"])
+if result and isinstance(result, dict):
 
-    # ✅ SHOW SOURCES ONLY IF NOT SUMMARY
-    if query_len <= 8:
-        st.markdown("### 📚 Sources")
-        for s in result["sources"][:3]:
-            st.markdown(f"📄 Page {s['page']}")
-            st.info(s["text"][:300])
+    st.markdown("### 💬 Answer")
 
-    # ✅ SAVE HISTORY
-    st.session_state.chat_history.insert(0, {
-        "question": user_input,
-        "answer": result["answer"],
-        "source": [
-            {"page": s["page"], "text": s["text"][:80]}
-            for s in result["sources"][:2]
-        ]
-    })
+    answer_text = result.get("answer", "")
+    answer_text = re.sub(r'\[SOURCE:.*?\]', '', answer_text).strip()
 
-    st.session_state.chat_history = st.session_state.chat_history[:10]
+    st.write(answer_text)
 
-if "result" in st.session_state:
+    st.markdown("### 📚 Sources")
 
-    st.markdown("### 🌐 Translate")
+    sources = result.get("sources", [])
 
-    lang_choice = st.selectbox("Language", ["English","Telugu","Hindi"])
+    shown_pages = set()
 
-    if st.button("Translate"):
+    for s in sources:
+        if not isinstance(s, dict):
+            continue
 
-        # ✅ Clean answer
-        clean = re.sub(r'\[SOURCE:.*?\]', '', st.session_state.result["answer"]).strip()
+        page = s.get("page")
 
-        # ✅ Limit length (VERY IMPORTANT)
-        clean = clean[:2000]
+        if page and page not in shown_pages:
+            shown_pages.add(page)
 
-        try:
-            if lang_choice == "English":
-                st.write(clean)
+            with st.expander(f"📄 Page {page}", expanded=False):
+                st.markdown(f"**Content from Page {page}:**")
+                st.write(s.get("text", ""))
 
-            elif lang_choice == "Telugu":
-                translated = GoogleTranslator(source='auto', target='te').translate(clean)
-                st.success(translated)
+else:
+    st.info("👉 Ask a question to see results")
 
-            elif lang_choice == "Hindi":
-                translated = GoogleTranslator(source='auto', target='hi').translate(clean)
-                st.success(translated)
+# ───────── TRANSLATE OUTPUT ─────────
+st.markdown("### 🌐 Translate Answer")
 
-        except Exception as e:
-            st.error("⚠️ Translation failed. Try again.")
+lang_choice = st.selectbox("Select Language", ["English", "Telugu", "Hindi"])
+
+if st.button("Translate") and st.session_state.result:
+
+    clean = re.sub(r'\[SOURCE:.*?\]', '', st.session_state.result["answer"]).strip()
+
+    try:
+        if lang_choice == "English":
+            st.session_state.translated_text = clean
+        elif lang_choice == "Telugu":
+            st.session_state.translated_text = GoogleTranslator(source='auto', target='te').translate(clean)
+        elif lang_choice == "Hindi":
+            st.session_state.translated_text = GoogleTranslator(source='auto', target='hi').translate(clean)
+    except:
+        st.session_state.translated_text = "⚠️ Translation failed"
+
+if st.session_state.translated_text:
+    st.success(st.session_state.translated_text)
