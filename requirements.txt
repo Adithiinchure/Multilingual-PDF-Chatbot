@@ -7,3 +7,4 @@ pymupdf==1.23.26
 deep-translator
 python-dotenv
 requests
+pillow==10.0.1
