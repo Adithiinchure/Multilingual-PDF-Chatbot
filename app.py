@@ -115,22 +115,45 @@ def extract_pdf_pages(file_path, mode="Normal (text pdf)"):
 
 # ✅ GROQ + OPENROUTER
 def groq_call(messages):
-    client = Groq(api_key=GROQ_API_KEY)
+
+    import requests
+    import os
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+
+    groq_key = os.getenv("GROQ_API_KEY", "")
+
+    if not groq_key:
+        return "❌ GROQ API KEY missing"
+
+    headers = {
+        "Authorization": f"Bearer {groq_key}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": "llama3-8b-8192",
+        "messages": messages,
+        "max_tokens": 500,
+        "temperature": 0.2
+    }
 
     try:
-        r = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            max_tokens=500,
-            temperature=0.2
-        )
-        return r.choices[0].message.content.strip()
+        response = requests.post(url, headers=headers, json=data)
 
-    except:
-        openrouter_response = openrouter_call(messages)
-        if "⚠️" not in openrouter_response:
-            return openrouter_response
-        return "⚠️ All AI services failed."
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"].strip()
+
+        else:
+            # 🔥 fallback to OpenRouter
+            openrouter_response = openrouter_call(messages)
+            if "⚠️" not in openrouter_response:
+                return openrouter_response
+
+            return f"⚠️ Groq error: {response.status_code}"
+
+    except Exception as e:
+        return f"⚠️ Groq exception: {str(e)}"
 
 def openrouter_call(messages):
 
