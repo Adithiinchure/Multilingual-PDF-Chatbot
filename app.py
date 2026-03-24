@@ -50,7 +50,7 @@ st.set_page_config(page_title="Multilingual PDF Chatbot", layout="wide")
 
 # ✅ EMBEDDINGS
 embedding_model = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    model_name="BAAI/bge-small-en-v1.5",
 )
 
 # 🔥 TRANSLATE
@@ -132,7 +132,7 @@ def groq_call(messages):
     }
 
     data = {
-        "model": "llama3-8b-8192",
+        "model": "llama-3.3-70b-versatile",
         "messages": messages,
         "max_tokens": 500,
         "temperature": 0.2
