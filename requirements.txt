@@ -9,7 +9,7 @@ python-dotenv
 requests
 pillow==9.5.0
 langchain-community
-
+pytesseract
 langchain-core
 langchain-text-splitters
 torch

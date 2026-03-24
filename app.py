@@ -6,11 +6,21 @@ from deep_translator import GoogleTranslator
 import logging
 import requests
 import tempfile
+import platform
+import pytesseract   # ✅ ADD THIS
+
 try:
-    import pytesseract
+    if platform.system() == "Windows":
+        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+    pytesseract.get_tesseract_version()
     OCR_AVAILABLE = True
-except:
+
+except Exception as e:
     OCR_AVAILABLE = False
+    print("OCR ERROR:", e)
+
+
 from PIL import Image
 import fitz
 from langchain_community.vectorstores import Chroma
