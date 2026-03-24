@@ -24,6 +24,9 @@ load_dotenv()
 
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+if not GROQ_API_KEY:
+    st.error("❌ GROQ API KEY is missing. Please add it in HuggingFace Secrets.")
+    st.stop()
 GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 logging.basicConfig(
@@ -133,8 +136,16 @@ def openrouter_call(messages):
 
     url = "https://openrouter.ai/api/v1/chat/completions"
 
+    # ✅ GET KEY SAFELY
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+
+    # 🚨 IF KEY MISSING → STOP
+    if not openrouter_key:
+        return "⚠️ OpenRouter API key missing"
+
+    # ✅ USE KEY
     headers = {
-        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Authorization": f"Bearer {openrouter_key}",
         "Content-Type": "application/json"
     }
 
@@ -145,13 +156,14 @@ def openrouter_call(messages):
 
     try:
         response = requests.post(url, headers=headers, json=data)
+
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
         else:
-            return "⚠️ OpenRouter failed"
-    except:
-        return "⚠️ OpenRouter error"
+            return f"⚠️ OpenRouter failed: {response.status_code}"
 
+    except Exception as e:
+        return f"⚠️ OpenRouter error: {str(e)}"
 # ✅ RETRIEVE
 def retrieve(query, vectorstore, k=5):
 
