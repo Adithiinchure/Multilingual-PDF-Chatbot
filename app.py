@@ -73,23 +73,28 @@ def extract_pdf_pages(file_path, mode="Normal (text pdf)"):
 
         page = doc[page_num]
 
-        if mode == "Normal (Fast)":
+        # ✅ NORMAL MODE
+        if mode == "Normal (text pdf english)":
             text = page.get_text("text")
             print(f"⚡ Page {page_num+1}: Normal extraction")
 
+        # ✅ OCR MODE (SAFE)
         else:
             if OCR_AVAILABLE:
-              print(f"🌍 Page {page_num+1}: OCR extraction")
+                print(f"🌍 Page {page_num+1}: OCR extraction")
 
-        pix = page.get_pixmap()
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                pix = page.get_pixmap()
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-        text = pytesseract.image_to_string(
-            img,
-            lang='eng+tel+hin'
-        )
-    else:
-        text = ""
+                try:
+                    text = pytesseract.image_to_string(
+                        img,
+                        lang='eng+tel+hin'
+                    )
+                except:
+                    text = ""
+            else:
+                text = ""
 
         text = re.sub(r'\s+', ' ', text).strip()
 
@@ -189,6 +194,9 @@ def ask_groq(query, pages):
 with st.sidebar:
 
     mode = st.radio("Mode", ["Normal (text pdf english)", "OCR (Multilingual)"])
+    if mode == "OCR (Multilingual)" and not OCR_AVAILABLE:
+     st.warning("⚠️ OCR not supported in deployed app. Use Normal mode.")
+     mode = "Normal (text pdf english)"
 
     uploaded = st.file_uploader("Upload PDF", type=["pdf"])
 
