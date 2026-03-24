@@ -3,8 +3,10 @@ groq
 langchain
 chromadb==0.4.24
 sentence-transformers==2.2.2
-pymupdf==1.23.26
+pymupdf==1.22.5
 deep-translator
 python-dotenv
 requests
-pillow==10.0.1
+pillow==9.5.0
+
+pytesseract

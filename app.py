@@ -6,7 +6,11 @@ from deep_translator import GoogleTranslator
 import logging
 import requests
 import tempfile
-import pytesseract
+try:
+    import pytesseract
+    OCR_AVAILABLE = True
+except:
+    OCR_AVAILABLE = False
 from PIL import Image
 import fitz
 from langchain.vectorstores import Chroma
@@ -15,8 +19,6 @@ from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # 🔥 OCR setup
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
 
 load_dotenv()
 
@@ -76,15 +78,18 @@ def extract_pdf_pages(file_path, mode="Normal (text pdf)"):
             print(f"⚡ Page {page_num+1}: Normal extraction")
 
         else:
-            print(f"🌍 Page {page_num+1}: OCR extraction")
+            if OCR_AVAILABLE:
+              print(f"🌍 Page {page_num+1}: OCR extraction")
 
-            pix = page.get_pixmap()
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        pix = page.get_pixmap()
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-            text = pytesseract.image_to_string(
-                img,
-                lang='eng+tel+hin'
-            )
+        text = pytesseract.image_to_string(
+            img,
+            lang='eng+tel+hin'
+        )
+    else:
+        text = ""
 
         text = re.sub(r'\s+', ' ', text).strip()
 
