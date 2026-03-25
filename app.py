@@ -16,9 +16,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 HF_API_KEY = os.getenv("HF_API_KEY", "")
 # 🔥 EasyOCR INIT (Multilingual)
-reader_te = easyocr.Reader(['te','en'])
-reader_hi = easyocr.Reader(['hi','en'])
-reader_en = easyocr.Reader(['en'])
+reader_te = None
+reader_hi = None
+reader_en = None
 
 # 🔥 ENV
 load_dotenv()
@@ -50,15 +50,23 @@ def translate_to_english(text):
 # 🔥 EASY OCR FUNCTION
 def ocr_extract(img):
     import numpy as np
+    global reader_te, reader_hi, reader_en
 
     img_np = np.array(img)
+
+    # 🔥 lazy load (only when first used)
+    if reader_en is None:
+        reader_en = easyocr.Reader(['en'])
+    if reader_te is None:
+        reader_te = easyocr.Reader(['te','en'])
+    if reader_hi is None:
+        reader_hi = easyocr.Reader(['hi','en'])
 
     text_en = " ".join([r[1] for r in reader_en.readtext(img_np)])
     text_te = " ".join([r[1] for r in reader_te.readtext(img_np)])
     text_hi = " ".join([r[1] for r in reader_hi.readtext(img_np)])
 
-    # 🔥 combine all results
-    text = text_en + " " + text_te + " " + text_hi
+    return (text_en + " " + text_te + " " + text_hi).strip()
 
     return text.strip()
 
