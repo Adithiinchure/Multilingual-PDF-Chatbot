@@ -13,9 +13,12 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+HF_API_KEY = os.getenv("HF_API_KEY", "")
 # 🔥 EasyOCR INIT (Multilingual)
-reader = easyocr.Reader(['en','te','hi'])
+reader_te = easyocr.Reader(['te','en'])
+reader_hi = easyocr.Reader(['hi','en'])
+reader_en = easyocr.Reader(['en'])
 
 # 🔥 ENV
 load_dotenv()
@@ -46,9 +49,18 @@ def translate_to_english(text):
 
 # 🔥 EASY OCR FUNCTION
 def ocr_extract(img):
-    result = reader.readtext(np.array(img))
-    text = " ".join([r[1] for r in result])
-    return text
+    import numpy as np
+
+    img_np = np.array(img)
+
+    text_en = " ".join([r[1] for r in reader_en.readtext(img_np)])
+    text_te = " ".join([r[1] for r in reader_te.readtext(img_np)])
+    text_hi = " ".join([r[1] for r in reader_hi.readtext(img_np)])
+
+    # 🔥 combine all results
+    text = text_en + " " + text_te + " " + text_hi
+
+    return text.strip()
 
 # 🔥 PDF EXTRACTION
 def extract_pdf_pages(file_path):
@@ -104,12 +116,78 @@ def groq_call(messages):
         "temperature": 0.3
     }
 
-    res = requests.post(url, headers=headers, json=data)
+    try:
+        res = requests.post(url, headers=headers, json=data)
 
-    if res.status_code == 200:
-        return res.json()["choices"][0]["message"]["content"]
-    return "Error from Groq"
+        if res.status_code == 200:
+            return res.json()["choices"][0]["message"]["content"]
 
+        # 🔥 fallback → OpenRouter
+        open_res = openrouter_call(messages)
+        if open_res:
+            return open_res
+
+        # 🔥 fallback → HuggingFace
+        hf_res = huggingface_call(messages)
+        if hf_res:
+            return hf_res
+
+        return "⚠️ All APIs failed"
+
+    except:
+        open_res = openrouter_call(messages)
+        if open_res:
+            return open_res
+
+        hf_res = huggingface_call(messages)
+        if hf_res:
+            return hf_res
+
+        return "⚠️ All APIs failed"
+
+
+def openrouter_call(messages):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": "mistralai/mistral-7b-instruct",
+        "messages": messages
+    }
+
+    try:
+        res = requests.post(url, headers=headers, json=data)
+        if res.status_code == 200:
+            return res.json()["choices"][0]["message"]["content"]
+        else:
+            return None
+    except:
+        return None
+    
+def huggingface_call(messages):
+    url = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta"
+
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}"
+    }
+
+    prompt = ""
+    for m in messages:
+        prompt += f"{m['role']}: {m['content']}\n"
+
+    try:
+        res = requests.post(url, headers=headers, json={"inputs": prompt})
+
+        if res.status_code == 200:
+            return res.json()[0]["generated_text"]
+        else:
+            return None
+    except:
+        return None
 # 🔥 RETRIEVE (IMPROVED)
 def retrieve(query, vectorstore):
     results = vectorstore.similarity_search(query, k=5)
