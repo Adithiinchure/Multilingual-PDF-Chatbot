@@ -14,3 +14,5 @@ langchain-core
 langchain-text-splitters
 torch
 huggingface_hub==0.14.1
+opencv-python-headless
+numpy
