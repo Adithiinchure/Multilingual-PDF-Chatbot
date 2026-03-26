@@ -21,7 +21,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.retrievers import BM25Retriever
 
-from langchain.retrievers.ensemble import EnsembleRetriever
+
 from langchain_core.documents import Document
 from langchain_groq import ChatGroq
 
@@ -184,14 +184,11 @@ def process_pdf(uploaded_file):
     bm25 = BM25Retriever.from_documents(chunks)
     bm25.k = 25
 
-    retriever = EnsembleRetriever(
-        retrievers=[bm25, vector_retriever],
-        weights=[0.5, 0.5]
-    )
+   
 
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-    return retriever, reranker
+    return bm25, vector_retriever, reranker
 
 
 def rerank(query, docs, reranker, top_k=8):
@@ -212,13 +209,11 @@ if file:
 
     if st.session_state.retriever is None:
         with st.spinner("Processing PDF..."):
-            r, rr = process_pdf(file)
+            bm25, vector_retriever, rr = process_pdf(file)
 
-            if r is None:
-                st.stop()
-
-            st.session_state.retriever = r
-            st.session_state.reranker = rr
+        st.session_state.bm25 = bm25
+        st.session_state.vector = vector_retriever
+        st.session_state.reranker = rr
 
         st.success("✅ PDF processed")
 
@@ -238,9 +233,12 @@ if file:
         queries.append(q)
 
         all_docs = []
-        for query in queries:
-            all_docs.extend(st.session_state.retriever.invoke(query))
 
+        for query in queries:
+            bm25_docs = st.session_state.bm25.get_relevant_documents(query)
+            vector_docs = st.session_state.vector.get_relevant_documents(query)
+
+            all_docs.extend(bm25_docs + vector_docs)
         docs = list({d.page_content: d for d in all_docs}.values())
         docs = rerank(q, docs, st.session_state.reranker)
 
