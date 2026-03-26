@@ -235,8 +235,8 @@ if file:
         all_docs = []
 
         for query in queries:
-            bm25_docs = st.session_state.bm25.get_relevant_documents(query)
-            vector_docs = st.session_state.vector.get_relevant_documents(query)
+            bm25_docs = st.session_state.bm25.invoke(query)
+            vector_docs = st.session_state.vector.invoke(query)
 
             all_docs.extend(bm25_docs + vector_docs)
         docs = list({d.page_content: d for d in all_docs}.values())
