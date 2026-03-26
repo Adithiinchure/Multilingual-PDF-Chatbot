@@ -24,7 +24,7 @@
 
 pdfplumber
 pytesseract
-opencv-python
+opencv-python-headless 
 pillow
 numpy
 langdetect
