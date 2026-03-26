@@ -35,3 +35,4 @@ langchain-huggingface
 chromadb
 python-dotenv
 langchain-groq
+rank-bm25
