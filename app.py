@@ -1,314 +1,287 @@
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import streamlit as st
-import re, os, tempfile
-from dotenv import load_dotenv
-from deep_translator import GoogleTranslator
-import logging
+import tempfile
+import re
 import requests
-from PIL import Image
-import fitz
+from dotenv import load_dotenv
+
+import pdfplumber
+import pytesseract
+import cv2
 import numpy as np
-import easyocr  # ✅ NEW
+from PIL import Image
 
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_core.documents import Document
+from langdetect import detect
+from sentence_transformers import CrossEncoder
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-HF_API_KEY = os.getenv("HF_API_KEY", "")
-# 🔥 EasyOCR INIT (Multilingual)
-reader_te = None
-reader_hi = None
-reader_en = None
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_community.retrievers import BM25Retriever
 
-# 🔥 ENV
+from langchain.retrievers import EnsembleRetriever
+from langchain_core.documents import Document
+from langchain_groq import ChatGroq
+
+
+# ---------------- TESSERACT ----------------
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+
+# ---------------- ENV ----------------
 load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-# 🔥 LOGGING
-logging.basicConfig(filename="chatbot.log", level=logging.INFO)
 
-# 🔥 SESSION
-for k,v in [("chat_history",[]),("pdf_name",""),("result",None)]:
-    if k not in st.session_state:
-        st.session_state[k]=v
+# ---------------- OPENROUTER INIT ----------------
+openrouter_key = os.getenv("OPENROUTER_API_KEY")
+openrouter_available = bool(openrouter_key)
 
-if "history" not in st.session_state:
-    st.session_state.history = []
 
-# 🔥 EMBEDDING
-embedding_model = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-small-en-v1.5"
-)
+# ---------------- GROQ ----------------
+if "groq" not in st.session_state:
+    st.session_state.groq = ChatGroq(
+        model_name="llama-3.3-70b-versatile",
+        temperature=0
+    )
 
-# 🔥 TRANSLATE
-def translate_to_english(text):
+
+# ---------------- MULTI LLM ----------------
+def multi_llm(prompt):
+
+    # 1️⃣ OPENROUTER FIRST
+    if openrouter_available:
+        try:
+            st.info("🔵 Using OpenRouter...")
+
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ]
+                }
+            )
+
+            result = response.json()
+
+            if "choices" in result:
+                text = result["choices"][0]["message"]["content"]
+                st.session_state["model_used"] = "OpenRouter"
+                return text
+
+        except Exception as e:
+            st.warning(f"⚠️ OpenRouter failed: {e}")
+
+    # 2️⃣ GROQ FALLBACK
     try:
-        return GoogleTranslator(source='auto', target='en').translate(text)
+        st.info("🟠 Using Groq...")
+        response = st.session_state.groq.invoke(prompt)
+
+        if response.content:
+            st.session_state["model_used"] = "Groq"
+            return response.content
+
+    except Exception as e:
+        st.warning(f"⚠️ Groq failed: {e}")
+
+    st.session_state["model_used"] = "None"
+    return "❌ All AI APIs failed."
+
+
+# ---------------- SESSION ----------------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "retriever" not in st.session_state:
+    st.session_state.retriever = None
+
+if "reranker" not in st.session_state:
+    st.session_state.reranker = None
+
+
+# ---------------- FUNCTIONS ----------------
+
+def detect_language(text):
+    try:
+        return detect(text)
     except:
-        return text
+        return "en"
 
-# 🔥 EASY OCR FUNCTION
-def ocr_extract(img):
-    import numpy as np
-    global reader_te, reader_hi, reader_en
 
-    img_np = np.array(img)
-
-    # 🔥 lazy load (only when first used)
-    if reader_en is None:
-        reader_en = easyocr.Reader(['en'])
-    if reader_te is None:
-        reader_te = easyocr.Reader(['te','en'])
-    if reader_hi is None:
-        reader_hi = easyocr.Reader(['hi','en'])
-
-    text_en = " ".join([r[1] for r in reader_en.readtext(img_np)])
-    text_te = " ".join([r[1] for r in reader_te.readtext(img_np)])
-    text_hi = " ".join([r[1] for r in reader_hi.readtext(img_np)])
-
-    return (text_en + " " + text_te + " " + text_hi).strip()
-
+def clean_text(text):
+    text = re.sub(r'\n+', '\n', text)
+    text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-# 🔥 PDF EXTRACTION
-def extract_pdf_pages(file_path):
 
-    doc = fitz.open(file_path)
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=150
+def preprocess_image(img):
+    img = np.array(img)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 11, 2
     )
+    return Image.fromarray(thresh)
+
+
+def process_pdf(uploaded_file):
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(uploaded_file.read())
+        path = tmp.name
 
     docs = []
 
-    for page_num in range(len(doc)):
-        page = doc[page_num]
+    with pdfplumber.open(path) as pdf:
+        for i, page in enumerate(pdf.pages):
 
-        # ✅ TRY NORMAL TEXT FIRST
-        text = page.get_text("text")
+            text = page.extract_text()
 
-        # 🔥 IF EMPTY → OCR
-        if not text.strip():
-            pix = page.get_pixmap()
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            text = ocr_extract(img)
+            if not text or len(text.strip()) < 50:
+                try:
+                    img = page.to_image(resolution=300).original
+                    img = preprocess_image(img)
+                    text = pytesseract.image_to_string(img)
+                except:
+                    text = ""
 
-        text = re.sub(r'\s+', ' ', text).strip()
+            text = clean_text(text)
 
-        if not text:
-            continue
+            if len(text) > 50:
+                docs.append(Document(page_content=text, metadata={"page": i+1}))
 
-        chunks = splitter.split_text(text)
+    if not docs:
+        st.error("❌ No text extracted from PDF")
+        return None, None
 
-        for chunk in chunks:
-            docs.append(Document(
-                page_content=chunk,
-                metadata={"page": page_num + 1}
-            ))
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=300
+    )
 
-    return docs
+    chunks = splitter.split_documents(docs)
 
-# 🔥 GROQ CALL
-def groq_call(messages):
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    if not chunks:
+        st.error("❌ Chunking failed")
+        return None, None
 
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-base-en-v1.5"
+    )
 
-    data = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": messages,
-        "temperature": 0.3
-    }
+    vectordb = Chroma.from_documents(chunks, embeddings)
 
-    try:
-        res = requests.post(url, headers=headers, json=data)
+    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 40})
 
-        if res.status_code == 200:
-            return res.json()["choices"][0]["message"]["content"]
+    bm25 = BM25Retriever.from_documents(chunks)
+    bm25.k = 25
 
-        # 🔥 fallback → OpenRouter
-        open_res = openrouter_call(messages)
-        if open_res:
-            return open_res
+    retriever = EnsembleRetriever(
+        retrievers=[bm25, vector_retriever],
+        weights=[0.5, 0.5]
+    )
 
-        # 🔥 fallback → HuggingFace
-        hf_res = huggingface_call(messages)
-        if hf_res:
-            return hf_res
+    reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-        return "⚠️ All APIs failed"
-
-    except:
-        open_res = openrouter_call(messages)
-        if open_res:
-            return open_res
-
-        hf_res = huggingface_call(messages)
-        if hf_res:
-            return hf_res
-
-        return "⚠️ All APIs failed"
+    return retriever, reranker
 
 
-def openrouter_call(messages):
-    url = "https://openrouter.ai/api/v1/chat/completions"
+def rerank(query, docs, reranker, top_k=8):
+    pairs = [[query, d.page_content] for d in docs]
+    scores = reranker.predict(pairs)
+    scored = list(zip(docs, scores))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [x[0] for x in scored[:top_k]]
 
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
 
-    data = {
-        "model": "mistralai/mistral-7b-instruct",
-        "messages": messages
-    }
+# ---------------- UI ----------------
 
-    try:
-        res = requests.post(url, headers=headers, json=data)
-        if res.status_code == 200:
-            return res.json()["choices"][0]["message"]["content"]
+st.title("⚖️ Legal RAG System")
+
+file = st.file_uploader("Upload PDF", type="pdf")
+
+if file:
+
+    if st.session_state.retriever is None:
+        with st.spinner("Processing PDF..."):
+            r, rr = process_pdf(file)
+
+            if r is None:
+                st.stop()
+
+            st.session_state.retriever = r
+            st.session_state.reranker = rr
+
+        st.success("✅ PDF processed")
+
+    q = st.chat_input("Ask your question...")
+
+    if q:
+
+        lang = detect_language(q)
+
+        if lang == "te":
+            q = multi_llm(f"Translate Telugu to English:\n{q}")
+        elif lang == "hi":
+            q = multi_llm(f"Translate Hindi to English:\n{q}")
+
+        queries_text = multi_llm(f"Generate 5 queries:\n{q}")
+        queries = [x.strip() for x in queries_text.split("\n") if x.strip()]
+        queries.append(q)
+
+        all_docs = []
+        for query in queries:
+            all_docs.extend(st.session_state.retriever.invoke(query))
+
+        docs = list({d.page_content: d for d in all_docs}.values())
+        docs = rerank(q, docs, st.session_state.reranker)
+
+        if docs:
+            context = ""
+            for d in docs:
+                context += f"\n--- PAGE {d.metadata.get('page')} ---\n{d.page_content}\n"
+
+            prompt = f"""
+Use ONLY the context. Quote law. Show page.
+
+Context:
+{context}
+
+Question:
+{q}
+
+Answer:
+"""
+            ans = multi_llm(prompt)
         else:
-            return None
-    except:
-        return None
-    
-def huggingface_call(messages):
-    url = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta"
+            ans = "Not enough information"
 
-    headers = {
-        "Authorization": f"Bearer {HF_API_KEY}"
-    }
+        st.session_state.chat_history.append(("user", q))
+        st.session_state.chat_history.append(("bot", ans))
 
-    prompt = ""
-    for m in messages:
-        prompt += f"{m['role']}: {m['content']}\n"
+    for role, msg in st.session_state.chat_history:
+        st.chat_message("user" if role=="user" else "assistant").write(msg)
 
-    try:
-        res = requests.post(url, headers=headers, json={"inputs": prompt})
+    if st.session_state.chat_history:
+        last = st.session_state.chat_history[-1][1]
 
-        if res.status_code == 200:
-            return res.json()[0]["generated_text"]
-        else:
-            return None
-    except:
-        return None
-# 🔥 RETRIEVE (IMPROVED)
-def retrieve(query, vectorstore):
-    results = vectorstore.similarity_search(query, k=5)
+        col1, col2 = st.columns(2)
 
-    return [
-        {"page": doc.metadata["page"], "text": doc.page_content}
-        for doc in results
-    ]
+        with col1:
+            if st.button("Telugu"):
+                st.write(multi_llm(f"Translate to Telugu:\n{last}"))
 
-# 🔥 ASK (SMART ANSWER)
-def ask_groq(query, pages):
+        with col2:
+            if st.button("Hindi"):
+                st.write(multi_llm(f"Translate to Hindi:\n{last}"))
 
-    if not pages:
-        return {"answer": "No relevant info found.", "sources": []}
-
-    context = ""
-    for p in pages:
-        context += f"\n[PAGE {p['page']}]\n{p['text']}"
-
-    response = groq_call([
-        {
-            "role": "system",
-            "content": "Answer clearly using the context. If partial info exists, still answer helpfully."
-        },
-        {
-            "role": "user",
-            "content": f"{query}\n\n{context}"
-        }
-    ])
-
-    return {"answer": response, "sources": pages}
-
-# ───────── SIDEBAR ─────────
-with st.sidebar:
-
-    st.markdown("### Mode")
-    st.radio("Mode", ["Normal (text pdf english)", "OCR (Multilingual)"])
-
-    uploaded = st.file_uploader("Upload PDF", type=["pdf"])
-
-    if uploaded:
-        if uploaded.name != st.session_state.pdf_name:
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded.read())
-                tmp_path = tmp.name
-
-            docs = extract_pdf_pages(tmp_path)
-
-            vectorstore = Chroma.from_documents(
-                documents=docs,
-                embedding=embedding_model
-            )
-
-            st.session_state.vectorstore = vectorstore
-            st.session_state.pdf_name = uploaded.name
-
-            st.success("✅ PDF processed!")
-
-    st.markdown("### History")
-
-    for i, item in enumerate(st.session_state.history):
-        if st.button(item["q"], key=f"h{i}"):
-            st.session_state.result = {"answer": item["a"], "sources": []}
-
-# ───────── MAIN ─────────
-st.title("💬 Multilingual PDF Chatbot")
-
-user_input = st.text_input("Ask something")
-
-if st.button("Ask") and user_input:
-
-    if "vectorstore" not in st.session_state:
-        st.warning("Upload PDF first")
-        st.stop()
-
-    english_query = translate_to_english(user_input)
-
-    pages = retrieve(english_query, st.session_state.vectorstore)
-
-    result = ask_groq(english_query, pages)
-
-    st.session_state.result = result
-
-    st.session_state.history.insert(0, {
-        "q": user_input,
-        "a": result["answer"]
-    })
-
-# ───────── OUTPUT ─────────
-result = st.session_state.get("result")
-
-if result:
-    st.markdown("### 💬 Answer")
-    st.write(result["answer"])
-
-    st.markdown("### 📚 Sources")
-
-    for s in result["sources"]:
-        with st.expander(f"Page {s['page']}"):
-            st.write(s["text"])
-
-# ───────── TRANSLATE ─────────
-st.markdown("### 🌐 Translate")
-
-lang = st.selectbox("Language", ["English", "Telugu", "Hindi"])
-
-if st.button("Translate") and result:
-    text = result["answer"]
-
-    if lang == "Telugu":
-        text = GoogleTranslator(source='auto', target='te').translate(text)
-    elif lang == "Hindi":
-        text = GoogleTranslator(source='auto', target='hi').translate(text)
-
-    st.success(text)
+    if "model_used" in st.session_state:
+        st.info(f"🤖 Model Used: {st.session_state['model_used']}")
