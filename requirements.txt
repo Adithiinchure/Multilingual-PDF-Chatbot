@@ -26,7 +26,7 @@ pdfplumber
 pytesseract
 opencv-python-headless 
 pillow
-numpy
+
 langdetect
 sentence-transformers
 langchain
@@ -36,5 +36,10 @@ chromadb
 python-dotenv
 langchain-groq
 rank-bm25
+numpy==1.26.4
+
 torch==2.2.2
 torchvision==0.17.2
+
+transformers==4.40.0
+sentence-transformers==2.7.0
