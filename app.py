@@ -1,6 +1,7 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
+import nltk
+nltk.download('punkt')
 import streamlit as st
 import tempfile
 import re
@@ -131,7 +132,11 @@ def preprocess_image(img):
     )
     return Image.fromarray(thresh)
 
-
+@st.cache_resource
+def load_embeddings():
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 def process_pdf(uploaded_file):
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -173,9 +178,7 @@ def process_pdf(uploaded_file):
         st.error("❌ Chunking failed")
         return None, None
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+    embeddings = load_embeddings()
 
     vectordb = Chroma.from_documents(chunks, embeddings)
 
