@@ -45,10 +45,12 @@ openrouter_available = bool(openrouter_key)
 
 
 # ---------------- GROQ ----------------
-if "groq" not in st.session_state:
+groq_key = os.getenv("GROQ_API_KEY")
+if groq_key and "groq" not in st.session_state:
     st.session_state.groq = ChatGroq(
         model_name="llama-3.3-70b-versatile",
-        temperature=0
+        temperature=0,
+        api_key=groq_key
     )
 
 
@@ -69,43 +71,56 @@ def multi_llm(prompt):
                 json={
                     "model": "openai/gpt-4o-mini",
                     "messages": [
+                        {"role": "system", "content": "You are a legal assistant. Answer based only on provided context."},
                         {"role": "user", "content": prompt}
                     ]
-                }
+                },
+                timeout=30
             )
 
             result = response.json()
 
-            if "choices" in result:
+            if "choices" in result and result.get("choices"):
                 text = result["choices"][0]["message"]["content"]
-                st.session_state["model_used"] = "OpenRouter"
+                st.session_state["model_used"] = "OpenRouter (GPT-4o Mini)"
                 return text
+            else:
+                st.warning(f"⚠️ OpenRouter error: {result.get('error', 'Unknown error')}")
 
         except Exception as e:
-            st.warning(f"⚠️ OpenRouter failed: {e}")
+            st.warning(f"⚠️ OpenRouter failed: {str(e)}")
 
     # 2️⃣ GROQ FALLBACK
-    try:
-        st.info("🟠 Using Groq...")
-        response = st.session_state.groq.invoke(prompt)
+    if groq_key:
+        try:
+            st.info("🟠 Using Groq...")
+            response = st.session_state.groq.invoke(prompt)
 
-        if response.content:
-            st.session_state["model_used"] = "Groq"
-            return response.content
+            if response.content:
+                st.session_state["model_used"] = "Groq (Llama 3.3 70B)"
+                return response.content
+            else:
+                st.warning("⚠️ Groq returned empty response")
 
-    except Exception as e:
-        st.warning(f"⚠️ Groq failed: {e}")
+        except Exception as e:
+            st.warning(f"⚠️ Groq failed: {str(e)}")
+    else:
+        st.warning("⚠️ GROQ_API_KEY not set in .env")
 
     st.session_state["model_used"] = "None"
-    return "❌ All AI APIs failed."
+    return "❌ All AI APIs failed. Check your API keys (.env file)"
 
 
 # ---------------- SESSION ----------------
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-if "retriever" not in st.session_state:
-    st.session_state.retriever = None
+# FIX #1: Changed from "retriever" to "bm25" to match actual usage
+if "bm25" not in st.session_state:
+    st.session_state.bm25 = None
+
+if "vector" not in st.session_state:
+    st.session_state.vector = None
 
 if "reranker" not in st.session_state:
     st.session_state.reranker = None
@@ -141,6 +156,8 @@ def load_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
+
+
 def process_pdf(uploaded_file):
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -159,7 +176,8 @@ def process_pdf(uploaded_file):
                     img = page.to_image(resolution=300).original
                     img = preprocess_image(img)
                     text = pytesseract.image_to_string(img)
-                except:
+                except Exception as e:
+                    st.warning(f"OCR failed for page {i+1}: {str(e)}")
                     text = ""
 
             text = clean_text(text)
@@ -168,8 +186,8 @@ def process_pdf(uploaded_file):
                 docs.append(Document(page_content=text, metadata={"page": i+1}))
 
     if not docs:
-        st.error("❌ No text extracted from PDF")
-        return None, None
+        st.error("❌ No text extracted from PDF. Check if PDF is valid and readable.")
+        return None, None, None
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1200,
@@ -180,7 +198,7 @@ def process_pdf(uploaded_file):
 
     if not chunks:
         st.error("❌ Chunking failed")
-        return None, None
+        return None, None, None
 
     embeddings = load_embeddings()
 
@@ -191,14 +209,15 @@ def process_pdf(uploaded_file):
     bm25 = BM25Retriever.from_documents(chunks)
     bm25.k = 25
 
-   
-
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
     return bm25, vector_retriever, reranker
 
 
 def rerank(query, docs, reranker, top_k=8):
+    if not docs:
+        return []
+    
     pairs = [[query, d.page_content] for d in docs]
     scores = reranker.predict(pairs)
     scored = list(zip(docs, scores))
@@ -210,19 +229,24 @@ def rerank(query, docs, reranker, top_k=8):
 
 st.title("⚖️ Legal RAG System")
 
+st.markdown("### Upload PDF")
 file = st.file_uploader("Upload PDF", type="pdf")
 
 if file:
 
-    if st.session_state.retriever is None:
-        with st.spinner("Processing PDF..."):
+    # FIX #2: Check the actual variables that store retrievers
+    if st.session_state.bm25 is None:
+        with st.spinner("🔄 Processing PDF... This may take a minute."):
             bm25, vector_retriever, rr = process_pdf(file)
 
-        st.session_state.bm25 = bm25
-        st.session_state.vector = vector_retriever
-        st.session_state.reranker = rr
-
-        st.success("✅ PDF processed")
+        if bm25 is not None:
+            st.session_state.bm25 = bm25
+            st.session_state.vector = vector_retriever
+            st.session_state.reranker = rr
+            st.success("✅ PDF processed successfully!")
+        else:
+            st.error("Failed to process PDF")
+            st.stop()
 
     q = st.chat_input("Ask your question...")
 
@@ -230,32 +254,44 @@ if file:
 
         lang = detect_language(q)
 
+        # Translate if needed
         if lang == "te":
-            q = multi_llm(f"Translate Telugu to English:\n{q}")
+            st.info("🔄 Translating Telugu to English...")
+            q = multi_llm(f"Translate this Telugu text to English. Return ONLY the English translation:\n{q}")
         elif lang == "hi":
-            q = multi_llm(f"Translate Hindi to English:\n{q}")
+            st.info("🔄 Translating Hindi to English...")
+            q = multi_llm(f"Translate this Hindi text to English. Return ONLY the English translation:\n{q}")
 
-        queries_text = multi_llm(f"Generate 5 queries:\n{q}")
+        st.info("🔍 Generating search queries...")
+        queries_text = multi_llm(f"Generate 5 alternative search queries for this question. Return only the queries, one per line:\n{q}")
         queries = [x.strip() for x in queries_text.split("\n") if x.strip()]
         queries.append(q)
 
         all_docs = []
 
+        st.info(f"📚 Searching with {len(queries)} queries...")
         for query in queries:
-            bm25_docs = st.session_state.bm25.invoke(query)
-            vector_docs = st.session_state.vector.invoke(query)
+            try:
+                bm25_docs = st.session_state.bm25.invoke(query)
+                vector_docs = st.session_state.vector.invoke(query)
+                all_docs.extend(bm25_docs + vector_docs)
+            except Exception as e:
+                st.warning(f"Search error: {str(e)}")
 
-            all_docs.extend(bm25_docs + vector_docs)
+        # Remove duplicates
         docs = list({d.page_content: d for d in all_docs}.values())
-        docs = rerank(q, docs, st.session_state.reranker)
+        
+        # Rerank results
+        docs = rerank(q, docs, st.session_state.reranker, top_k=8)
 
         if docs:
+            st.info(f"📄 Found {len(docs)} relevant sections")
             context = ""
             for d in docs:
-                context += f"\n--- PAGE {d.metadata.get('page')} ---\n{d.page_content}\n"
+                context += f"\n--- PAGE {d.metadata.get('page', 'N/A')} ---\n{d.page_content}\n"
 
-            prompt = f"""
-Use ONLY the context. Quote law. Show page.
+            prompt = f"""You are a legal assistant. Answer ONLY based on the provided context.
+If information is not in the context, say "The provided context does not contain information about this."
 
 Context:
 {context}
@@ -263,30 +299,45 @@ Context:
 Question:
 {q}
 
-Answer:
-"""
+Answer (cite page numbers):"""
+            
             ans = multi_llm(prompt)
         else:
-            ans = "Not enough information"
+            ans = "❌ No relevant information found in the PDF. Try a different question."
 
         st.session_state.chat_history.append(("user", q))
         st.session_state.chat_history.append(("bot", ans))
 
+    # Display chat history
+    st.markdown("### Conversation")
     for role, msg in st.session_state.chat_history:
-        st.chat_message("user" if role=="user" else "assistant").write(msg)
+        if role == "user":
+            st.chat_message("user").write(msg)
+        else:
+            st.chat_message("assistant").write(msg)
 
+    # Translation buttons
     if st.session_state.chat_history:
         last = st.session_state.chat_history[-1][1]
 
+        st.markdown("### Translate Last Answer")
         col1, col2 = st.columns(2)
 
         with col1:
-            if st.button("Telugu"):
-                st.write(multi_llm(f"Translate to Telugu:\n{last}"))
+            if st.button("📍 Telugu"):
+                with st.spinner("Translating..."):
+                    telugu = multi_llm(f"Translate to Telugu. Return ONLY the Telugu translation:\n{last}")
+                    st.write(telugu)
 
         with col2:
-            if st.button("Hindi"):
-                st.write(multi_llm(f"Translate to Hindi:\n{last}"))
+            if st.button("📍 Hindi"):
+                with st.spinner("Translating..."):
+                    hindi = multi_llm(f"Translate to Hindi. Return ONLY the Hindi translation:\n{last}")
+                    st.write(hindi)
 
+    # Show model info
     if "model_used" in st.session_state:
-        st.info(f"🤖 Model Used: {st.session_state['model_used']}")
+        st.sidebar.info(f"🤖 Model: {st.session_state['model_used']}")
+
+else:
+    st.info("👆 Upload a PDF file to get started")
