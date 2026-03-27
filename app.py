@@ -1,7 +1,11 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import nltk
-nltk.download('punkt')
+
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
 import streamlit as st
 import tempfile
 import re

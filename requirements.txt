@@ -43,3 +43,5 @@ torchvision==0.17.2
 
 transformers==4.40.0
 sentence-transformers==2.7.0
+nltk
+# force rebuild
