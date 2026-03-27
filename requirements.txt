@@ -36,3 +36,5 @@ chromadb
 python-dotenv
 langchain-groq
 rank-bm25
+torch
+torchvision
