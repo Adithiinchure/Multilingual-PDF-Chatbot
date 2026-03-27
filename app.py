@@ -17,7 +17,7 @@ from langdetect import detect
 from sentence_transformers import CrossEncoder
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.retrievers import BM25Retriever
 
@@ -174,7 +174,7 @@ def process_pdf(uploaded_file):
         return None, None
 
     embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5"
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
     vectordb = Chroma.from_documents(chunks, embeddings)
