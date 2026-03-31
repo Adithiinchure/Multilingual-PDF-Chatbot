@@ -229,25 +229,28 @@ if file:
 
     if q:
         q = q.lower()
+        original_q = q
+        q = q.lower().strip()
 
         lang = detect_language(q)
 
-        if lang == "te":
-            q = multi_llm(f"Translate Telugu to English:\n{q}")
-        elif lang == "hi":
-            q = multi_llm(f"Translate Hindi to English:\n{q}")
+        if lang in ["te", "hi"]:
+         translated = multi_llm(f"Translate to English:\n{q}")
+    if translated:
+        q = translated.lower().strip()
 
         queries = [q]
 
         all_docs = []
 
         for query in queries:
-            bm25_docs = st.session_state.bm25.invoke(query)
-            vector_docs = st.session_state.vector.invoke(query)
+            bm25_docs = st.session_state.bm25.invoke(q)
+            vector_docs = st.session_state.vector.invoke(q)
 
-            all_docs.extend(bm25_docs + vector_docs)
-        docs = list({d.page_content: d for d in all_docs}.values())
-        docs = rerank(q, docs, st.session_state.reranker, top_k=10)
+            docs = bm25_docs + vector_docs
+            docs = list({d.page_content: d for d in docs}.values())
+            docs = rerank(q, docs, st.session_state.reranker, top_k=10)
+            
 
         if docs:
             context = ""
