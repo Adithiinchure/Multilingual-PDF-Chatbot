@@ -234,15 +234,15 @@ if file:
 
         lang = detect_language(q)
 
+        translated = None
+
         if lang in ["te", "hi"]:
             translated = multi_llm(f"Translate to English:\n{q}")
 
-            if translated:
-                q = translated.lower().strip()
+        if translated:
+            q = translated.lower().strip()
 
         queries = [q]
-
-        all_docs = []
 
         for query in queries:
             bm25_docs = st.session_state.bm25.invoke(q)
