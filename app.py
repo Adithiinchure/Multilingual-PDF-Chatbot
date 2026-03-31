@@ -186,7 +186,8 @@ def process_pdf(uploaded_file):
 
     vectordb = Chroma.from_documents(chunks, embeddings)
 
-    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 40})
+    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 60})
+
 
     bm25 = BM25Retriever.from_documents(chunks)
     bm25.k = 25
@@ -227,6 +228,7 @@ if file:
     q = st.chat_input("Ask your question...")
 
     if q:
+        q = q.lower()
 
         lang = detect_language(q)
 
@@ -235,9 +237,7 @@ if file:
         elif lang == "hi":
             q = multi_llm(f"Translate Hindi to English:\n{q}")
 
-        queries_text = multi_llm(f"Generate 5 queries:\n{q}")
-        queries = [x.strip() for x in queries_text.split("\n") if x.strip()]
-        queries.append(q)
+        queries = [q]
 
         all_docs = []
 
@@ -247,7 +247,7 @@ if file:
 
             all_docs.extend(bm25_docs + vector_docs)
         docs = list({d.page_content: d for d in all_docs}.values())
-        docs = rerank(q, docs, st.session_state.reranker)
+        docs = rerank(q, docs, st.session_state.reranker, top_k=10)
 
         if docs:
             context = ""
@@ -255,7 +255,12 @@ if file:
                 context += f"\n--- PAGE {d.metadata.get('page')} ---\n{d.page_content}\n"
 
             prompt = f"""
-Use ONLY the context. Quote law. Show page.
+Answer using ONLY the given context.
+
+If answer is partially available, answer based on available context.
+
+If completely not found, say:
+Not enough information in the document.
 
 Context:
 {context}
