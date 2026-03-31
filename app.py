@@ -235,9 +235,10 @@ if file:
         lang = detect_language(q)
 
         if lang in ["te", "hi"]:
-         translated = multi_llm(f"Translate to English:\n{q}")
-    if translated:
-        q = translated.lower().strip()
+            translated = multi_llm(f"Translate to English:\n{q}")
+
+            if translated:
+                q = translated.lower().strip()
 
         queries = [q]
 
