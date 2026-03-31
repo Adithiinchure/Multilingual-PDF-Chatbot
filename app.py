@@ -242,11 +242,11 @@ if file:
         if translated:
             q = translated.lower().strip()
 
-        queries = [q]
+        queries = list(set([q, original_q]))
 
         for query in queries:
-            bm25_docs = st.session_state.bm25.invoke(q)
-            vector_docs = st.session_state.vector.invoke(q)
+            bm25_docs = st.session_state.bm25.invoke(query)
+            vector_docs = st.session_state.vector.invoke(query)
 
             docs = bm25_docs + vector_docs
             docs = list({d.page_content: d for d in docs}.values())
