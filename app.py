@@ -1,5 +1,6 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+from langchain_core.prompts import PromptTemplate
 import nltk
 
 try:
@@ -22,7 +23,7 @@ from langdetect import detect
 from sentence_transformers import CrossEncoder
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.retrievers import BM25Retriever
 
@@ -103,6 +104,7 @@ def multi_llm(prompt):
 # ---------------- SESSION ----------------
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+MAX_HISTORY = 10
 
 if "retriever" not in st.session_state:
     st.session_state.retriever = None
@@ -210,6 +212,22 @@ def rerank(query, docs, reranker, top_k=8):
 # ---------------- UI ----------------
 
 st.title("⚖️ Legal RAG System")
+# -------- SIDEBAR HISTORY --------
+with st.sidebar:
+    st.title("📜 Chat History")
+
+    history = st.session_state.chat_history
+
+    if history:
+        for i in range(0, len(history), 2):
+            if i+1 < len(history):
+                q_hist = history[i][1]
+                a_hist = history[i+1][1]
+
+                with st.expander(f"Q: {q_hist[:30]}..."):
+                    st.write(a_hist)
+    else:
+        st.write("No history yet")
 
 file = st.file_uploader("Upload PDF", type="pdf")
 
@@ -251,51 +269,62 @@ if file:
             docs = bm25_docs + vector_docs
             docs = list({d.page_content: d for d in docs}.values())
             docs = rerank(q, docs, st.session_state.reranker, top_k=10)
-            
 
         if docs:
             context = ""
             for d in docs:
                 context += f"\n--- PAGE {d.metadata.get('page')} ---\n{d.page_content}\n"
 
-            prompt = f"""
-Answer using ONLY the given context.
+        prompt = PromptTemplate(
+            input_variables=["context", "question"],
+            template="""
+    You are a helpful assistant answering questions from a document.
 
-If answer is partially available, answer based on available context.
+    Use ONLY the information from the provided context.
 
-If completely not found, say:
-Not enough information in the document.
+    If the answer is not present in the context say:
+    "Not enough information in the document."
 
-Context:
-{context}
+    Context:
+    {context}
 
-Question:
-{q}
+    Question:
+    {question}
 
-Answer:
-"""
-            ans = multi_llm(prompt)
-        else:
-            ans = "Not enough information"
+    Answer in English:
+    """
+        )
 
+        final_prompt = prompt.format(context=context, question=q)
+        ans = multi_llm(final_prompt)
+
+        # -------- SAVE HISTORY --------
         st.session_state.chat_history.append(("user", q))
         st.session_state.chat_history.append(("bot", ans))
 
-    for role, msg in st.session_state.chat_history:
-        st.chat_message("user" if role=="user" else "assistant").write(msg)
+        # Keep only last 10 Q&A
+        if len(st.session_state.chat_history) > MAX_HISTORY * 2:
+            st.session_state.chat_history = st.session_state.chat_history[-MAX_HISTORY*2:]
+    # -------- DISPLAY CHAT --------
 
-    if st.session_state.chat_history:
-        last = st.session_state.chat_history[-1][1]
+    
+# -------- DISPLAY CHAT --------
+for role, msg in st.session_state.chat_history:
+    st.chat_message("user" if role=="user" else "assistant").write(msg)
 
-        col1, col2 = st.columns(2)
+# Translation buttons
+if st.session_state.chat_history:
+    last = st.session_state.chat_history[-1][1]
 
-        with col1:
-            if st.button("Telugu"):
-                st.write(multi_llm(f"Translate to Telugu:\n{last}"))
+    col1, col2 = st.columns(2)
 
-        with col2:
-            if st.button("Hindi"):
-                st.write(multi_llm(f"Translate to Hindi:\n{last}"))
+    with col1:
+        if st.button("Telugu"):
+            st.write(multi_llm(f"Translate to Telugu:\n{last}"))
+
+    with col2:
+        if st.button("Hindi"):
+            st.write(multi_llm(f"Translate to Hindi:\n{last}"))
 
     if "model_used" in st.session_state:
         st.info(f"🤖 Model Used: {st.session_state['model_used']}")
