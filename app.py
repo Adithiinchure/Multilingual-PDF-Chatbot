@@ -104,6 +104,8 @@ def multi_llm(prompt):
 # ---------------- SESSION ----------------
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "current_chat" not in st.session_state:
+    st.session_state.current_chat = None
 MAX_HISTORY = 10
 
 if "retriever" not in st.session_state:
@@ -219,13 +221,9 @@ with st.sidebar:
     history = st.session_state.chat_history
 
     if history:
-        for i in range(0, len(history), 2):
-            if i+1 < len(history):
-                q_hist = history[i][1]
-                a_hist = history[i+1][1]
-
-                with st.expander(f"Q: {q_hist[:30]}..."):
-                    st.write(a_hist)
+         for item in history[::-1]:
+            with st.expander(f"Q: {item['question'][:30]}..."):
+                st.write(item["answer"])
     else:
         st.write("No history yet")
 
@@ -299,8 +297,15 @@ if file:
         ans = multi_llm(final_prompt)
 
         # -------- SAVE HISTORY --------
-        st.session_state.chat_history.append(("user", q))
-        st.session_state.chat_history.append(("bot", ans))
+        # Move previous chat to history
+        if st.session_state.current_chat:
+            st.session_state.chat_history.append(st.session_state.current_chat)
+
+        # Store only latest chat
+        st.session_state.current_chat = {
+            "question": q,
+            "answer": ans
+        } 
 
         # Keep only last 10 Q&A
         if len(st.session_state.chat_history) > MAX_HISTORY * 2:
@@ -309,12 +314,13 @@ if file:
 
     
 # -------- DISPLAY CHAT --------
-for role, msg in st.session_state.chat_history:
-    st.chat_message("user" if role=="user" else "assistant").write(msg)
 
+if st.session_state.current_chat:
+    st.chat_message("user").write(st.session_state.current_chat["question"])
+    st.chat_message("assistant").write(st.session_state.current_chat["answer"])
 # Translation buttons
 if st.session_state.chat_history:
-    last = st.session_state.chat_history[-1][1]
+    last = st.session_state.current_chat["answer"]
 
     col1, col2 = st.columns(2)
 
