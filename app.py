@@ -190,11 +190,11 @@ def process_pdf(uploaded_file):
 
     vectordb = Chroma.from_documents(chunks, embeddings)
 
-    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 60})
+    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 20})
 
 
     bm25 = BM25Retriever.from_documents(chunks)
-    bm25.k = 25
+    bm25.k = 20
 
    
 
