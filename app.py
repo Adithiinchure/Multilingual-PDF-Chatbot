@@ -173,7 +173,7 @@ def process_pdf(uploaded_file):
 
     if not docs:
         st.error("❌ No text extracted from PDF")
-        return None, None
+        return None, None, None
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1200,
@@ -184,7 +184,7 @@ def process_pdf(uploaded_file):
 
     if not chunks:
         st.error("❌ Chunking failed")
-        return None, None
+        return None, None, None
 
     embeddings = load_embeddings()
 
@@ -234,6 +234,8 @@ if file:
     if st.session_state.retriever is None:
         with st.spinner("Processing PDF..."):
             bm25, vector_retriever, rr = process_pdf(file)
+            if bm25 is None:
+                st.stop()
 
         st.session_state.bm25 = bm25
         st.session_state.vector = vector_retriever
