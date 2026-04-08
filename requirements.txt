@@ -47,18 +47,51 @@
 # force rebuild
 
 
+#streamlit==1.32.2
+#langchain==0.1.17
+#langchain-community==0.0.36
+#langchain-core==0.1.52
+#langchain-huggingface==0.0.3
+#langchain-groq==0.1.4
+#sentence-transformers==2.7.0
+#chromadb==0.4.24
+#pdfplumber
+#pytesseract
+#opencv-python-headless
+#Pillow
+#numpy
+#scikit-learn
+#nltk
+#langdetect
+#python-dotenv
+#requests
+#rank-bm25
+
+
 streamlit==1.32.2
-langchain==0.1.17
-langchain-community==0.0.36
+
+# LangChain (compatible versions)
+langchain==0.1.20
+langchain-community==0.0.38
 langchain-core==0.1.52
 langchain-huggingface==0.0.3
 langchain-groq==0.1.4
+
+# ML + Embeddings
+torch==2.2.2
 sentence-transformers==2.7.0
+
+# Vector DB
 chromadb==0.4.24
+
+# PDF + OCR
 pdfplumber
 pytesseract
+pdf2image
 opencv-python-headless
 Pillow
+
+# Utils
 numpy
 scikit-learn
 nltk
