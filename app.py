@@ -145,7 +145,7 @@ def load_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
-from pdf2image import convert_from_path
+
 def process_pdf(uploaded_file):
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -154,38 +154,22 @@ def process_pdf(uploaded_file):
 
     docs = []
 
-    # Convert full PDF to images (BEST METHOD)
-    images = convert_from_path(path, dpi=300, use_pdftocairo=True)
+    with pdfplumber.open(path) as pdf:
+        for i, page in enumerate(pdf.pages):
 
-    for i, img in enumerate(images):
+            text = page.extract_text()
 
-        # Try normal text extraction first
-        text = ""
-        try:
-            with pdfplumber.open(path) as pdf:
-                text = pdf.pages[i].extract_text() or ""
-        except:
-            text = ""
-
-        # If failed → OCR
-        if not text or len(text.strip()) < 50:
-            try:
-                img = preprocess_image(img)
-                text = pytesseract.image_to_string(img)
-            except Exception as e:
-                print(f"OCR failed on page {i}: {e}")
+            if not text:
                 text = ""
 
-        text = clean_text(text)
+            text = clean_text(text)
 
-        if len(text) > 50:
-            docs.append(Document(page_content=text, metadata={"page": i+1}))
+            if text.strip():
+                docs.append(Document(page_content=text, metadata={"page": i+1}))
 
     if not docs:
-        st.error("❌ No text extracted from PDF (even after OCR)")
+        st.error("❌ This PDF is scanned (image-based). OCR is not supported in deployment.")
         return None, None, None
-
-    # --- rest SAME ---
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1200,
@@ -194,21 +178,14 @@ def process_pdf(uploaded_file):
 
     chunks = splitter.split_documents(docs)
 
-    if not chunks:
-        st.error("❌ Chunking failed")
-        return None, None, None
-
     embeddings = load_embeddings()
 
     vectordb = Chroma.from_documents(chunks, embeddings)
 
     vector_retriever = vectordb.as_retriever(search_kwargs={"k": 20})
 
-
     bm25 = BM25Retriever.from_documents(chunks)
     bm25.k = 20
-
-   
 
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 

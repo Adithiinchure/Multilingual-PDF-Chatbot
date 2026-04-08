@@ -87,7 +87,7 @@ chromadb==0.4.24
 # PDF + OCR
 pdfplumber
 pytesseract
-pdf2image
+
 opencv-python-headless
 Pillow
 
