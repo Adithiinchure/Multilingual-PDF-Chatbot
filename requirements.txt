@@ -90,7 +90,7 @@ pytesseract
 pdf2image
 opencv-python-headless
 Pillow
-PyPDFLoader
+
 
 # Utils
 numpy
@@ -100,3 +100,4 @@ langdetect
 python-dotenv
 requests
 rank-bm25
+rich==13.7.1

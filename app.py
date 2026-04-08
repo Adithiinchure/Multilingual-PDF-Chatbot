@@ -155,7 +155,7 @@ def process_pdf(uploaded_file):
     docs = []
 
     # Convert full PDF to images (BEST METHOD)
-    images = convert_from_path(path, dpi=300)
+    images = convert_from_path(path, dpi=300, use_pdftocairo=True)
 
     for i, img in enumerate(images):
 
