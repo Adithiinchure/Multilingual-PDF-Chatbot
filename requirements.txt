@@ -90,6 +90,7 @@ pytesseract
 pdf2image
 opencv-python-headless
 Pillow
+PyPDFLoader
 
 # Utils
 numpy

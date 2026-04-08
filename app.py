@@ -145,6 +145,7 @@ def load_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
+from pdf2image import convert_from_path
 def process_pdf(uploaded_file):
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -153,27 +154,38 @@ def process_pdf(uploaded_file):
 
     docs = []
 
-    with pdfplumber.open(path) as pdf:
-        for i, page in enumerate(pdf.pages):
+    # Convert full PDF to images (BEST METHOD)
+    images = convert_from_path(path, dpi=300)
 
-            text = page.extract_text()
+    for i, img in enumerate(images):
 
-            if not text or len(text.strip()) < 50:
-                try:
-                    img = page.to_image(resolution=300).original
-                    img = preprocess_image(img)
-                    text = pytesseract.image_to_string(img)
-                except:
-                    text = ""
+        # Try normal text extraction first
+        text = ""
+        try:
+            with pdfplumber.open(path) as pdf:
+                text = pdf.pages[i].extract_text() or ""
+        except:
+            text = ""
 
-            text = clean_text(text)
+        # If failed → OCR
+        if not text or len(text.strip()) < 50:
+            try:
+                img = preprocess_image(img)
+                text = pytesseract.image_to_string(img)
+            except Exception as e:
+                print(f"OCR failed on page {i}: {e}")
+                text = ""
 
-            if len(text) > 50:
-                docs.append(Document(page_content=text, metadata={"page": i+1}))
+        text = clean_text(text)
+
+        if len(text) > 50:
+            docs.append(Document(page_content=text, metadata={"page": i+1}))
 
     if not docs:
-        st.error("❌ No text extracted from PDF")
+        st.error("❌ No text extracted from PDF (even after OCR)")
         return None, None, None
+
+    # --- rest SAME ---
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1200,
