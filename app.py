@@ -2,7 +2,7 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from langchain_core.prompts import PromptTemplate
 import nltk
-
+import pypdfium2 as pdfium
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
@@ -145,7 +145,16 @@ def load_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
+def convert_pdf_to_images(path):
+    pdf = pdfium.PdfDocument(path)
+    images = []
 
+    for i in range(len(pdf)):
+        page = pdf[i]
+        pil_image = page.render(scale=300/72).to_pil()
+        images.append(pil_image)
+
+    return images
 def process_pdf(uploaded_file):
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -159,17 +168,21 @@ def process_pdf(uploaded_file):
 
             text = page.extract_text()
 
-            if not text:
-                text = ""
+            # If no text → use OCR
+            if not text or len(text.strip()) < 30:
+                try:
+                    images = convert_pdf_to_images(path)
+                    img = images[i]
+                    img = preprocess_image(img)
+                    text = pytesseract.image_to_string(img)
+                except Exception as e:
+                    print(f"OCR failed on page {i+1}: {e}")
+                    text = ""
 
             text = clean_text(text)
-
             if text.strip():
-                docs.append(Document(page_content=text, metadata={"page": i+1}))
+               docs.append(Document(page_content=text, metadata={"page": i+1}))
 
-    if not docs:
-        st.error("❌ This PDF is scanned (image-based). OCR is not supported in deployment.")
-        return None, None, None
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1200,
