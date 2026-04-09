@@ -155,13 +155,15 @@ def process_pdf(uploaded_file):
 
             if not text or len(text.strip()) < 50:
                 try:
-                    img = page.to_image(resolution=300).original
+                    img = page.to_image(resolution=150).original
                     img = preprocess_image(img)
 
                     # ✅ Multi-language OCR
                     text = pytesseract.image_to_string(
                     img,
-                    lang="eng+hin+tel"
+                    lang="eng+hin+tel",
+                    config="--psm 6"
+
                     )
 
                 except Exception as e:
@@ -179,8 +181,8 @@ def process_pdf(uploaded_file):
         return None, None
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=300
+        chunk_size=800,
+        chunk_overlap=150
     )
 
     chunks = splitter.split_documents(docs)
@@ -249,15 +251,32 @@ if file:
         if translated:
             q = translated.lower().strip()
 
-        queries = list(set([q, original_q]))
+        
+        queries = list(set([
+        q,
+        original_q,
+        f"{q} festival",
+        f"explain {q}",
+        f"what is {q}"
+    ]))  
 
-        for query in queries:
-            bm25_docs = st.session_state.bm25.invoke(query)
-            vector_docs = st.session_state.vector.invoke(query)
+    for query in queries:
 
-            docs = bm25_docs + vector_docs
-            docs = list({d.page_content: d for d in docs}.values())
-            docs = rerank(q, docs, st.session_state.reranker, top_k=10)
+    # 🔥 STEP 1: LIMIT BEFORE MERGE
+        bm25_docs = st.session_state.bm25.invoke(query)[:5]
+        vector_docs = st.session_state.vector.invoke(query)[:5]
+
+        # 🔥 STEP 2: MERGE
+        docs = bm25_docs + vector_docs
+
+        # 🔥 STEP 3: REMOVE DUPLICATES
+        docs = list({d.page_content: d for d in docs}.values())
+
+        # 🔥 STEP 4: LIMIT BEFORE RERANK (VERY IMPORTANT)
+        docs = docs[:10]
+
+        # 🔥 STEP 5: RERANK SMALL SET (FAST + ACCURATE)
+        docs = rerank(q, docs, st.session_state.reranker, top_k=5)
             
 
         if docs:
