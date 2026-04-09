@@ -250,35 +250,38 @@ if file:
 
         if translated:
             q = translated.lower().strip()
-
-        
-        queries = list(set([
+            queries = list(set([
         q,
         original_q,
-        f"{q} festival",
         f"explain {q}",
-        f"what is {q}"
-    ]))  
+        f"what is {q}",
+        f"details about {q}",
+        f"{q} meaning",
+    ]))
+        all_docs = []
 
-    for query in queries:
+        for query in queries:
 
-    # 🔥 STEP 1: LIMIT BEFORE MERGE
-        bm25_docs = st.session_state.bm25.invoke(query)[:5]
-        vector_docs = st.session_state.vector.invoke(query)[:5]
+            bm25_docs = st.session_state.bm25.invoke(query)[:5]
+            vector_docs = st.session_state.vector.invoke(query)[:5]
 
-        # 🔥 STEP 2: MERGE
-        docs = bm25_docs + vector_docs
+            docs = bm25_docs + vector_docs
+            docs = list({d.page_content: d for d in docs}.values())
 
-        # 🔥 STEP 3: REMOVE DUPLICATES
-        docs = list({d.page_content: d for d in docs}.values())
+            all_docs.extend(docs)   # 🔥 IMPORTANT
 
-        # 🔥 STEP 4: LIMIT BEFORE RERANK (VERY IMPORTANT)
-        docs = docs[:10]
+        # remove duplicates
+        all_docs = list({d.page_content: d for d in all_docs}.values())
 
-        # 🔥 STEP 5: RERANK SMALL SET (FAST + ACCURATE)
-        docs = rerank(q, docs, st.session_state.reranker, top_k=5)
-            
+        # limit
+        all_docs = all_docs[:15]
 
+        # rerank
+        docs = rerank(q, all_docs, st.session_state.reranker, top_k=5)
+                
+                  
+
+                    
         if docs:
             context = ""
             for d in docs:
