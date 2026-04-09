@@ -32,7 +32,8 @@ from langchain_groq import ChatGroq
 
 
 # ---------------- TESSERACT ----------------
-pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
 
 # ---------------- ENV ----------------
 load_dotenv()
@@ -44,10 +45,14 @@ openrouter_available = bool(openrouter_key)
 
 
 # ---------------- GROQ ----------------
-if "groq" not in st.session_state:
+groq_key = os.getenv("GROQ_API_KEY")
+groq_available = bool(groq_key)
+
+if "groq" not in st.session_state and groq_available:
     st.session_state.groq = ChatGroq(
         model_name="llama-3.3-70b-versatile",
-        temperature=0
+        temperature=0.2,
+        groq_api_key=groq_key
     )
 
 
@@ -84,16 +89,17 @@ def multi_llm(prompt):
             st.warning(f"⚠️ OpenRouter failed: {e}")
 
     # 2️⃣ GROQ FALLBACK
-    try:
-        st.info("🟠 Using Groq...")
-        response = st.session_state.groq.invoke(prompt)
+    if groq_available and "groq" in st.session_state:
+        try:
+            st.info("🟠 Using Groq...")
+            response = st.session_state.groq.invoke(prompt)
 
-        if response.content:
-            st.session_state["model_used"] = "Groq"
-            return response.content
+            if response.content:
+                st.session_state["model_used"] = "Groq"
+                return response.content
 
-    except Exception as e:
-        st.warning(f"⚠️ Groq failed: {e}")
+        except Exception as e:
+            st.warning(f"⚠️ Groq failed: {e}")
 
     st.session_state["model_used"] = "None"
     return "❌ All AI APIs failed."
@@ -149,27 +155,17 @@ def process_pdf(uploaded_file):
     docs = []
 
     with pdfplumber.open(path) as pdf:
-        for i, page in enumerate(pdf.pages[:100]):
+        for i, page in enumerate(pdf.pages):
 
             text = page.extract_text()
 
             if not text or len(text.strip()) < 50:
                 try:
-                    img = page.to_image(resolution=150).original
+                    img = page.to_image(resolution=300).original
                     img = preprocess_image(img)
-
-                    # ✅ Multi-language OCR
-                    text = pytesseract.image_to_string(
-                    img,
-                    lang="eng+hin+tel",
-                    config="--psm 6"
-
-                    )
-
-                except Exception as e:
-                    print(f"❌ OCR failed on page {i+1}: {e}") 
-                    continue  # 🔥 IMPORTANT
-   # 🔥 SKIP BAD PAGE
+                    text = pytesseract.image_to_string(img)
+                except:
+                    text = ""
 
             text = clean_text(text)
 
@@ -181,8 +177,8 @@ def process_pdf(uploaded_file):
         return None, None
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=150
+        chunk_size=1200,
+        chunk_overlap=300
     )
 
     chunks = splitter.split_documents(docs)
@@ -195,11 +191,11 @@ def process_pdf(uploaded_file):
 
     vectordb = Chroma.from_documents(chunks, embeddings)
 
-    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 5})
+    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 60})
 
 
     bm25 = BM25Retriever.from_documents(chunks)
-    bm25.k = 5
+    bm25.k = 25
 
    
 
@@ -250,38 +246,18 @@ if file:
 
         if translated:
             q = translated.lower().strip()
-            queries = list(set([
-        q,
-        original_q,
-        f"explain {q}",
-        f"what is {q}",
-        f"details about {q}",
-        f"{q} meaning",
-    ]))
-        all_docs = []
+
+        queries = list(set([q, original_q]))
 
         for query in queries:
-
-            bm25_docs = st.session_state.bm25.invoke(query)[:5]
-            vector_docs = st.session_state.vector.invoke(query)[:5]
+            bm25_docs = st.session_state.bm25.invoke(query)
+            vector_docs = st.session_state.vector.invoke(query)
 
             docs = bm25_docs + vector_docs
             docs = list({d.page_content: d for d in docs}.values())
+            docs = rerank(q, docs, st.session_state.reranker, top_k=10)
+            
 
-            all_docs.extend(docs)   # 🔥 IMPORTANT
-
-        # remove duplicates
-        all_docs = list({d.page_content: d for d in all_docs}.values())
-
-        # limit
-        all_docs = all_docs[:15]
-
-        # rerank
-        docs = rerank(q, all_docs, st.session_state.reranker, top_k=5)
-                
-                  
-
-                    
         if docs:
             context = ""
             for d in docs:
