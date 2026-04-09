@@ -33,8 +33,8 @@ from langchain_groq import ChatGroq
 
 
 # ---------------- TESSERACT ----------------
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # ---------------- ENV ----------------
 load_dotenv()
@@ -48,6 +48,7 @@ openrouter_available = bool(openrouter_key)
 # ---------------- GROQ ----------------
 if "groq" not in st.session_state:
     st.session_state.groq = ChatGroq(
+        api_key=os.getenv("GROQ_API_KEY"),
         model_name="llama-3.3-70b-versatile",
         temperature=0
     )
@@ -171,10 +172,11 @@ def process_pdf(uploaded_file):
             # If no text → use OCR
             if not text or len(text.strip()) < 30:
                 try:
-                    images = convert_pdf_to_images(path)
-                    img = images[i]
+                    pdf = pdfium.PdfDocument(path)
+                    page = pdf[i]
+                    img = page.render(scale=300/72).to_pil()
                     img = preprocess_image(img)
-                    text = pytesseract.image_to_string(img)
+                    text = pytesseract.image_to_string(img,lang="eng+hin+tel",config="--psm 6")
                 except Exception as e:
                     print(f"OCR failed on page {i+1}: {e}")
                     text = ""
