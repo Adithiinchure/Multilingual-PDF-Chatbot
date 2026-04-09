@@ -1,8 +1,7 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-from langchain_core.prompts import PromptTemplate
 import nltk
-import pypdfium2 as pdfium
+
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
@@ -23,7 +22,7 @@ from langdetect import detect
 from sentence_transformers import CrossEncoder
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.retrievers import BM25Retriever
 
@@ -33,7 +32,6 @@ from langchain_groq import ChatGroq
 
 
 # ---------------- TESSERACT ----------------
-import pytesseract
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # ---------------- ENV ----------------
@@ -48,7 +46,6 @@ openrouter_available = bool(openrouter_key)
 # ---------------- GROQ ----------------
 if "groq" not in st.session_state:
     st.session_state.groq = ChatGroq(
-        api_key=os.getenv("GROQ_API_KEY"),
         model_name="llama-3.3-70b-versatile",
         temperature=0
     )
@@ -105,9 +102,6 @@ def multi_llm(prompt):
 # ---------------- SESSION ----------------
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-if "current_chat" not in st.session_state:
-    st.session_state.current_chat = None
-MAX_HISTORY = 10
 
 if "retriever" not in st.session_state:
     st.session_state.retriever = None
@@ -146,16 +140,6 @@ def load_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
-def convert_pdf_to_images(path):
-    pdf = pdfium.PdfDocument(path)
-    images = []
-
-    for i in range(len(pdf)):
-        page = pdf[i]
-        pil_image = page.render(scale=300/72).to_pil()
-        images.append(pil_image)
-
-    return images
 def process_pdf(uploaded_file):
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -165,26 +149,34 @@ def process_pdf(uploaded_file):
     docs = []
 
     with pdfplumber.open(path) as pdf:
-        for i, page in enumerate(pdf.pages):
+        for i, page in enumerate(pdf.pages[:100]):
 
             text = page.extract_text()
 
-            # If no text → use OCR
-            if not text or len(text.strip()) < 30:
+            if not text or len(text.strip()) < 50:
                 try:
-                    pdf = pdfium.PdfDocument(path)
-                    page = pdf[i]
-                    img = page.render(scale=300/72).to_pil()
+                    img = page.to_image(resolution=300).original
                     img = preprocess_image(img)
-                    text = pytesseract.image_to_string(img,lang="eng+hin+tel",config="--psm 6")
+
+                    # ✅ Multi-language OCR
+                    text = pytesseract.image_to_string(
+                    img,
+                    lang="eng+hin+tel"
+                    )
+
                 except Exception as e:
-                    print(f"OCR failed on page {i+1}: {e}")
-                    text = ""
+                    print(f"❌ OCR failed on page {i+1}: {e}") 
+                    continue  # 🔥 IMPORTANT
+   # 🔥 SKIP BAD PAGE
 
             text = clean_text(text)
-            if text.strip():
-               docs.append(Document(page_content=text, metadata={"page": i+1}))
 
+            if len(text) > 50:
+                docs.append(Document(page_content=text, metadata={"page": i+1}))
+
+    if not docs:
+        st.error("❌ No text extracted from PDF")
+        return None, None
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1200,
@@ -193,14 +185,21 @@ def process_pdf(uploaded_file):
 
     chunks = splitter.split_documents(docs)
 
+    if not chunks:
+        st.error("❌ Chunking failed")
+        return None, None
+
     embeddings = load_embeddings()
 
     vectordb = Chroma.from_documents(chunks, embeddings)
 
-    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 20})
+    vector_retriever = vectordb.as_retriever(search_kwargs={"k": 5})
+
 
     bm25 = BM25Retriever.from_documents(chunks)
-    bm25.k = 20
+    bm25.k = 5
+
+   
 
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
@@ -218,18 +217,6 @@ def rerank(query, docs, reranker, top_k=8):
 # ---------------- UI ----------------
 
 st.title("⚖️ Legal RAG System")
-# -------- SIDEBAR HISTORY --------
-with st.sidebar:
-    st.title("📜 Chat History")
-
-    history = st.session_state.chat_history
-
-    if history:
-         for item in history[::-1]:
-            with st.expander(f"Q: {item['question'][:30]}..."):
-                st.write(item["answer"])
-    else:
-        st.write("No history yet")
 
 file = st.file_uploader("Upload PDF", type="pdf")
 
@@ -238,8 +225,6 @@ if file:
     if st.session_state.retriever is None:
         with st.spinner("Processing PDF..."):
             bm25, vector_retriever, rr = process_pdf(file)
-            if bm25 is None:
-                st.stop()
 
         st.session_state.bm25 = bm25
         st.session_state.vector = vector_retriever
@@ -273,70 +258,51 @@ if file:
             docs = bm25_docs + vector_docs
             docs = list({d.page_content: d for d in docs}.values())
             docs = rerank(q, docs, st.session_state.reranker, top_k=10)
+            
 
         if docs:
             context = ""
             for d in docs:
                 context += f"\n--- PAGE {d.metadata.get('page')} ---\n{d.page_content}\n"
 
-        prompt = PromptTemplate(
-            input_variables=["context", "question"],
-            template="""
-    You are a helpful assistant answering questions from a document.
+            prompt = f"""
+Answer using ONLY the given context.
 
-    Use ONLY the information from the provided context.
+If answer is partially available, answer based on available context.
 
-    If the answer is not present in the context say:
-    "Not enough information in the document."
+If completely not found, say:
+Not enough information in the document.
 
-    Context:
-    {context}
+Context:
+{context}
 
-    Question:
-    {question}
+Question:
+{q}
 
-    Answer in English:
-    """
-        )
+Answer:
+"""
+            ans = multi_llm(prompt)
+        else:
+            ans = "Not enough information"
 
-        final_prompt = prompt.format(context=context, question=q)
-        ans = multi_llm(final_prompt)
+        st.session_state.chat_history.append(("user", q))
+        st.session_state.chat_history.append(("bot", ans))
 
-        # -------- SAVE HISTORY --------
-        # Move previous chat to history
-        if st.session_state.current_chat:
-            st.session_state.chat_history.append(st.session_state.current_chat)
+    for role, msg in st.session_state.chat_history:
+        st.chat_message("user" if role=="user" else "assistant").write(msg)
 
-        # Store only latest chat
-        st.session_state.current_chat = {
-            "question": q,
-            "answer": ans
-        } 
+    if st.session_state.chat_history:
+        last = st.session_state.chat_history[-1][1]
 
-        # Keep only last 10 Q&A
-        if len(st.session_state.chat_history) > MAX_HISTORY * 2:
-            st.session_state.chat_history = st.session_state.chat_history[-MAX_HISTORY*2:]
-    # -------- DISPLAY CHAT --------
+        col1, col2 = st.columns(2)
 
-    
-# -------- DISPLAY CHAT --------
+        with col1:
+            if st.button("Telugu"):
+                st.write(multi_llm(f"Translate to Telugu:\n{last}"))
 
-if st.session_state.current_chat:
-    st.chat_message("user").write(st.session_state.current_chat["question"])
-    st.chat_message("assistant").write(st.session_state.current_chat["answer"])
-# Translation buttons
-if st.session_state.chat_history:
-    last = st.session_state.current_chat["answer"]
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button("Telugu"):
-            st.write(multi_llm(f"Translate to Telugu:\n{last}"))
-
-    with col2:
-        if st.button("Hindi"):
-            st.write(multi_llm(f"Translate to Hindi:\n{last}"))
+        with col2:
+            if st.button("Hindi"):
+                st.write(multi_llm(f"Translate to Hindi:\n{last}"))
 
     if "model_used" in st.session_state:
         st.info(f"🤖 Model Used: {st.session_state['model_used']}")
