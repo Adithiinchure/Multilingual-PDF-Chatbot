@@ -6,11 +6,15 @@ try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
     nltk.download('punkt')
+
 import streamlit as st
 import tempfile
 import re
 import requests
 from dotenv import load_dotenv
+import hashlib
+import pickle
+from pathlib import Path
 
 import pdfplumber
 import pytesseract
@@ -33,26 +37,29 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.retrievers import BM25Retriever
 
-
 from langchain_core.documents import Document
 from langchain_groq import ChatGroq
 
+# ============ CONFIGURATION ============
+CACHE_DIR = Path(".cache")
+CACHE_DIR.mkdir(exist_ok=True)
 
-# ---------------- TESSERACT ----------------
+OCR_THRESHOLD = 100  # Min characters before OCR (increased from 50)
+OCR_DPI = 200  # Reduced from 300 for faster processing
+CHUNK_SIZE = 1200
+CHUNK_OVERLAP = 300
+TOP_K_RETRIEVAL = 8
+
+# ============ TESSERACT ============
 if os.name == "nt":
     pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-
-# ---------------- ENV ----------------
+# ============ ENV ============
 load_dotenv()
 
-
-# ---------------- OPENROUTER INIT ----------------
 openrouter_key = os.getenv("OPENROUTER_API_KEY")
 openrouter_available = bool(openrouter_key)
 
-
-# ---------------- GROQ ----------------
 groq_key = os.getenv("GROQ_API_KEY")
 groq_available = bool(groq_key)
 
@@ -63,15 +70,11 @@ if "groq" not in st.session_state and groq_available:
         groq_api_key=groq_key
     )
 
-
-# ---------------- MULTI LLM ----------------
+# ============ MULTI LLM ============
 def multi_llm(prompt):
-
-    # 1️⃣ OPENROUTER FIRST
+    """Call OpenRouter with Groq fallback"""
     if openrouter_available:
         try:
-            st.info("🔵 Using OpenRouter...")
-
             response = requests.post(
                 url="https://openrouter.ai/api/v1/chat/completions",
                 headers={
@@ -80,68 +83,90 @@ def multi_llm(prompt):
                 },
                 json={
                     "model": "openai/gpt-4o-mini",
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ]
-                }
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=30
             )
 
             result = response.json()
-
             if "choices" in result:
-                text = result["choices"][0]["message"]["content"]
                 st.session_state["model_used"] = "OpenRouter"
-                return text
-
+                return result["choices"][0]["message"]["content"]
         except Exception as e:
             st.warning(f"⚠️ OpenRouter failed: {e}")
 
-    # 2️⃣ GROQ FALLBACK
     if groq_available and "groq" in st.session_state:
         try:
-            st.info("🟠 Using Groq...")
             response = st.session_state.groq.invoke(prompt)
-
             if response.content:
                 st.session_state["model_used"] = "Groq"
                 return response.content
-
         except Exception as e:
             st.warning(f"⚠️ Groq failed: {e}")
 
     st.session_state["model_used"] = "None"
     return "❌ All AI APIs failed."
 
-
-# ---------------- SESSION ----------------
+# ============ SESSION ============
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-
-if "retriever" not in st.session_state:
-    st.session_state.retriever = None
-
+if "bm25" not in st.session_state:
+    st.session_state.bm25 = None
+if "vector" not in st.session_state:
+    st.session_state.vector = None
 if "reranker" not in st.session_state:
     st.session_state.reranker = None
+if "pdf_hash" not in st.session_state:
+    st.session_state.pdf_hash = None
 
+# ============ UTILITY FUNCTIONS ============
 
-# ---------------- FUNCTIONS ----------------
+def get_pdf_hash(file_bytes):
+    """Generate hash of PDF for caching"""
+    return hashlib.md5(file_bytes).hexdigest()
+
+def save_to_cache(pdf_hash, bm25, vector, reranker):
+    """Save processed PDF components to cache"""
+    try:
+        cache_file = CACHE_DIR / f"{pdf_hash}.pkl"
+        with open(cache_file, "wb") as f:
+            pickle.dump({"bm25": bm25, "vector": vector, "reranker": reranker}, f)
+    except Exception as e:
+        st.warning(f"⚠️ Cache save failed: {e}")
+
+def load_from_cache(pdf_hash):
+    """Load processed PDF components from cache"""
+    try:
+        cache_file = CACHE_DIR / f"{pdf_hash}.pkl"
+        if cache_file.exists():
+            with open(cache_file, "rb") as f:
+                data = pickle.load(f)
+                return data["bm25"], data["vector"], data["reranker"]
+    except Exception as e:
+        st.warning(f"⚠️ Cache load failed: {e}")
+    return None, None, None
 
 def detect_language(text):
+    """Detect text language"""
     try:
         return detect(text)
     except:
         return "en"
 
-
 def clean_text(text):
+    """Clean extracted text"""
     text = re.sub(r'\n+', '\n', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-
 def preprocess_image(img):
+    """Preprocess image for OCR"""
     img = np.array(img)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+    
     thresh = cv2.adaptiveThreshold(
         gray, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -149,10 +174,10 @@ def preprocess_image(img):
     )
     return Image.fromarray(thresh)
 
-
-def extract_text_from_page_image(page, pdf_path=None):
+def extract_text_from_page_image(page, pdf_path=None, page_num=None):
+    """Extract text from page using OCR with fallback"""
     try:
-        img = page.to_image(resolution=300).original
+        img = page.to_image(resolution=OCR_DPI).original
         img = preprocess_image(img)
         return pytesseract.image_to_string(img)
     except Exception as e:
@@ -160,179 +185,245 @@ def extract_text_from_page_image(page, pdf_path=None):
             try:
                 with open(pdf_path, "rb") as f:
                     images = convert_from_bytes(
-                        f.read(), dpi=300,
-                        first_page=page.page_number,
-                        last_page=page.page_number
+                        f.read(), dpi=OCR_DPI,
+                        first_page=page_num or page.page_number,
+                        last_page=page_num or page.page_number
                     )
                 img = preprocess_image(images[0])
                 return pytesseract.image_to_string(img)
             except Exception as ocr_error:
-                st.warning(f"⚠️ OCR fallback failed on page {page.page_number}: {ocr_error}")
-        else:
-            page_num = getattr(page, "page_number", None) or "unknown"
-            st.warning(f"⚠️ OCR failed on page {page_num}: {e}")
+                pass
         return ""
 
 @st.cache_resource
 def load_embeddings():
+    """Load embedding model (cached)"""
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
+
+@st.cache_resource
+def load_reranker():
+    """Load reranker model (cached)"""
+    return CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
 def process_pdf(uploaded_file):
+    """Process PDF with progress tracking and OCR skipping for text-heavy PDFs"""
     uploaded_file.seek(0)
+    file_bytes = uploaded_file.read()
+    
+    # Check cache first
+    pdf_hash = get_pdf_hash(file_bytes)
+    bm25, vector, reranker = load_from_cache(pdf_hash)
+    
+    if bm25 and vector and reranker:
+        st.success("✅ Loaded from cache (faster!)")
+        return bm25, vector, reranker, pdf_hash
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded_file.read())
+        tmp.write(file_bytes)
         path = tmp.name
 
     docs = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
     try:
         with pdfplumber.open(path) as pdf:
+            total_pages = len(pdf.pages)
+            
             for i, page in enumerate(pdf.pages):
+                # Update progress
+                progress = (i + 1) / total_pages
+                progress_bar.progress(progress)
+                status_text.text(f"Processing page {i+1}/{total_pages}...")
+                
+                # Extract text
                 text = page.extract_text() or ""
-
-                if len(text.strip()) < 50:
-                    text = extract_text_from_page_image(page, path)
-
+                
+                # Only use OCR if text extraction was poor
+                if len(text.strip()) < OCR_THRESHOLD:
+                    status_text.text(f"Running OCR on page {i+1}/{total_pages}...")
+                    text = extract_text_from_page_image(page, path, i+1)
+                
                 text = clean_text(text)
-
+                
                 if len(text) > 50:
                     docs.append(Document(page_content=text, metadata={"page": i+1}))
+    
     except Exception as e:
-        st.error(f"❌ Unable to open or parse PDF: {e}")
-        return None, None, None
+        st.error(f"❌ PDF processing failed: {e}")
+        return None, None, None, None
 
     if not docs:
-        st.error("❌ No text extracted from PDF")
-        return None, None, None
+        st.error("❌ No text extracted")
+        return None, None, None, None
 
+    # Chunking
+    status_text.text("Chunking text...")
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=300
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP
     )
-
     chunks = splitter.split_documents(docs)
 
     if not chunks:
         st.error("❌ Chunking failed")
-        return None, None, None
+        return None, None, None, None
 
+    # Embeddings & Vector DB
+    status_text.text("Creating embeddings...")
     embeddings = load_embeddings()
-
     vectordb = Chroma.from_documents(chunks, embeddings)
-
     vector_retriever = vectordb.as_retriever(search_kwargs={"k": 60})
 
-
+    # BM25
+    status_text.text("Creating BM25 index...")
     bm25 = BM25Retriever.from_documents(chunks)
     bm25.k = 25
 
-   
+    # Reranker
+    status_text.text("Loading reranker...")
+    reranker = load_reranker()
 
-    reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    # Clear progress
+    progress_bar.empty()
+    status_text.empty()
 
-    return bm25, vector_retriever, reranker
+    # Save to cache
+    save_to_cache(pdf_hash, bm25, vector_retriever, reranker)
 
+    return bm25, vector_retriever, reranker, pdf_hash
 
-def rerank(query, docs, reranker, top_k=8):
+def rerank(query, docs, reranker, top_k=TOP_K_RETRIEVAL):
+    """Rerank documents using cross-encoder"""
+    if not docs:
+        return []
+    
     pairs = [[query, d.page_content] for d in docs]
     scores = reranker.predict(pairs)
     scored = list(zip(docs, scores))
     scored.sort(key=lambda x: x[1], reverse=True)
     return [x[0] for x in scored[:top_k]]
 
+# ============ UI ============
 
-# ---------------- UI ----------------
-
+st.set_page_config(page_title="⚖️ Legal RAG System", layout="wide")
 st.title("⚖️ Legal RAG System")
+
+st.markdown("""
+**Tips for faster processing:**
+- Use PDFs with clear text (not scanned)
+- Remove unnecessary pages
+- Check `Cache` folder - it reuses processed PDFs!
+""")
 
 file = st.file_uploader("Upload PDF", type="pdf")
 
 if file:
+    file_bytes = file.read()
+    pdf_hash = get_pdf_hash(file_bytes)
+    file.seek(0)
+    
+    # Check if we need to reprocess
+    if st.session_state.pdf_hash != pdf_hash or st.session_state.bm25 is None:
+        with st.spinner("⏳ Processing PDF (first time may take a while)..."):
+            bm25, vector_retriever, reranker, hash_val = process_pdf(file)
 
-    if st.session_state.retriever is None:
-        with st.spinner("Processing PDF..."):
-            bm25, vector_retriever, rr = process_pdf(file)
-
-        if bm25 is None or vector_retriever is None or rr is None:
-            st.error("❌ PDF processing failed. Please try a different file or check the file content.")
+        if bm25 is None:
+            st.error("❌ PDF processing failed. Try a different file.")
         else:
             st.session_state.bm25 = bm25
             st.session_state.vector = vector_retriever
-            st.session_state.reranker = rr
-            st.success("✅ PDF processed")
+            st.session_state.reranker = reranker
+            st.session_state.pdf_hash = hash_val
+            st.success("✅ PDF ready!")
+    else:
+        st.success("✅ Using cached PDF")
 
+    # Chat interface
     q = st.chat_input("Ask your question...")
 
     if q:
-        q = q.lower()
+        q_lower = q.lower().strip()
         original_q = q
-        q = q.lower().strip()
 
+        # Language detection & translation
         lang = detect_language(q)
-
         translated = None
 
         if lang in ["te", "hi"]:
-            translated = multi_llm(f"Translate to English:\n{q}")
+            with st.spinner("🌐 Translating..."):
+                translated = multi_llm(f"Translate to English:\n{q}")
 
-        if translated:
-            q = translated.lower().strip()
+        final_query = translated.lower().strip() if translated else q_lower
 
-        queries = list(set([q, original_q]))
-
-        for query in queries:
-            bm25_docs = st.session_state.bm25.invoke(query)
-            vector_docs = st.session_state.vector.invoke(query)
-
+        # Retrieve documents
+        with st.spinner("🔍 Searching..."):
+            bm25_docs = st.session_state.bm25.invoke(final_query)
+            vector_docs = st.session_state.vector.invoke(final_query)
+            
+            # Deduplicate
             docs = bm25_docs + vector_docs
             docs = list({d.page_content: d for d in docs}.values())
-            docs = rerank(q, docs, st.session_state.reranker, top_k=10)
             
+            # Rerank
+            docs = rerank(final_query, docs, st.session_state.reranker)
 
+        # Generate answer
         if docs:
-            context = ""
-            for d in docs:
-                context += f"\n--- PAGE {d.metadata.get('page')} ---\n{d.page_content}\n"
+            context = "\n".join([
+                f"\n--- PAGE {d.metadata.get('page', '?')} ---\n{d.page_content}"
+                for d in docs
+            ])
 
-            prompt = f"""
-Answer using ONLY the given context.
-
+            prompt = f"""Answer using ONLY the given context.
 If answer is partially available, answer based on available context.
-
-If completely not found, say:
-Not enough information in the document.
+If completely not found, say: Not enough information in the document.
 
 Context:
 {context}
 
 Question:
-{q}
+{final_query}
 
-Answer:
-"""
-            ans = multi_llm(prompt)
+Answer:"""
+
+            with st.spinner("💭 Generating answer..."):
+                ans = multi_llm(prompt)
         else:
-            ans = "Not enough information"
+            ans = "Not enough information in the document."
 
-        st.session_state.chat_history.append(("user", q))
+        # Store history
+        st.session_state.chat_history.append(("user", final_query))
         st.session_state.chat_history.append(("bot", ans))
 
+    # Display chat
     for role, msg in st.session_state.chat_history:
-        st.chat_message("user" if role=="user" else "assistant").write(msg)
+        with st.chat_message("user" if role == "user" else "assistant"):
+            st.write(msg)
 
+    # Translation buttons
     if st.session_state.chat_history:
-        last = st.session_state.chat_history[-1][1]
-
+        st.divider()
+        st.subheader("Translate Last Answer")
         col1, col2 = st.columns(2)
 
         with col1:
-            if st.button("Telugu"):
-                st.write(multi_llm(f"Translate to Telugu:\n{last}"))
+            if st.button("🇹🇪 Telugu"):
+                last_answer = st.session_state.chat_history[-1][1]
+                with st.spinner("Translating..."):
+                    translated = multi_llm(f"Translate to Telugu:\n{last_answer}")
+                st.write(translated)
 
         with col2:
-            if st.button("Hindi"):
-                st.write(multi_llm(f"Translate to Hindi:\n{last}"))
+            if st.button("🇮🇳 Hindi"):
+                last_answer = st.session_state.chat_history[-1][1]
+                with st.spinner("Translating..."):
+                    translated = multi_llm(f"Translate to Hindi:\n{last_answer}")
+                st.write(translated)
 
+    # Footer
     if "model_used" in st.session_state:
-        st.info(f"🤖 Model Used: {st.session_state['model_used']}")
+        st.divider()
+        st.caption(f"🤖 Model: {st.session_state['model_used']}")
