@@ -18,6 +18,13 @@ import cv2
 import numpy as np
 from PIL import Image
 
+try:
+    from pdf2image import convert_from_bytes
+    pdf2image_available = True
+except ImportError:
+    convert_from_bytes = None
+    pdf2image_available = False
+
 from langdetect import detect
 from sentence_transformers import CrossEncoder
 
@@ -32,7 +39,8 @@ from langchain_groq import ChatGroq
 
 
 # ---------------- TESSERACT ----------------
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+if os.name == "nt":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
 # ---------------- ENV ----------------
@@ -141,40 +149,62 @@ def preprocess_image(img):
     )
     return Image.fromarray(thresh)
 
+
+def extract_text_from_page_image(page, pdf_path=None):
+    try:
+        img = page.to_image(resolution=300).original
+        img = preprocess_image(img)
+        return pytesseract.image_to_string(img)
+    except Exception as e:
+        if pdf2image_available and pdf_path:
+            try:
+                with open(pdf_path, "rb") as f:
+                    images = convert_from_bytes(
+                        f.read(), dpi=300,
+                        first_page=page.page_number,
+                        last_page=page.page_number
+                    )
+                img = preprocess_image(images[0])
+                return pytesseract.image_to_string(img)
+            except Exception as ocr_error:
+                st.warning(f"⚠️ OCR fallback failed on page {page.page_number}: {ocr_error}")
+        else:
+            page_num = getattr(page, "page_number", None) or "unknown"
+            st.warning(f"⚠️ OCR failed on page {page_num}: {e}")
+        return ""
+
 @st.cache_resource
 def load_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 def process_pdf(uploaded_file):
-
+    uploaded_file.seek(0)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())
         path = tmp.name
 
     docs = []
 
-    with pdfplumber.open(path) as pdf:
-        for i, page in enumerate(pdf.pages):
+    try:
+        with pdfplumber.open(path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text() or ""
 
-            text = page.extract_text()
+                if len(text.strip()) < 50:
+                    text = extract_text_from_page_image(page, path)
 
-            if not text or len(text.strip()) < 50:
-                try:
-                    img = page.to_image(resolution=300).original
-                    img = preprocess_image(img)
-                    text = pytesseract.image_to_string(img)
-                except:
-                    text = ""
+                text = clean_text(text)
 
-            text = clean_text(text)
-
-            if len(text) > 50:
-                docs.append(Document(page_content=text, metadata={"page": i+1}))
+                if len(text) > 50:
+                    docs.append(Document(page_content=text, metadata={"page": i+1}))
+    except Exception as e:
+        st.error(f"❌ Unable to open or parse PDF: {e}")
+        return None, None, None
 
     if not docs:
         st.error("❌ No text extracted from PDF")
-        return None, None
+        return None, None, None
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1200,
@@ -185,7 +215,7 @@ def process_pdf(uploaded_file):
 
     if not chunks:
         st.error("❌ Chunking failed")
-        return None, None
+        return None, None, None
 
     embeddings = load_embeddings()
 
@@ -224,11 +254,13 @@ if file:
         with st.spinner("Processing PDF..."):
             bm25, vector_retriever, rr = process_pdf(file)
 
-        st.session_state.bm25 = bm25
-        st.session_state.vector = vector_retriever
-        st.session_state.reranker = rr
-
-        st.success("✅ PDF processed")
+        if bm25 is None or vector_retriever is None or rr is None:
+            st.error("❌ PDF processing failed. Please try a different file or check the file content.")
+        else:
+            st.session_state.bm25 = bm25
+            st.session_state.vector = vector_retriever
+            st.session_state.reranker = rr
+            st.success("✅ PDF processed")
 
     q = st.chat_input("Ask your question...")
 
